@@ -1,0 +1,9 @@
+<mujoco>
+    <body name="zeus_car" pos="1 0 1.1">
+        <joint name="car_center_of_mass" type="free"/>
+        <geom name="target" pos="0 0 0" type="cylinder" size="0.34 0.01" rgba="0.655 0.820 0.212 1.000" friction="0.000 0.000 0.000"/>
+        <body name="inner_target" pos="0 0 0">
+            <geom pos="0 0 0.01" type="cylinder" size="0.17 0.01" rgba="0.153 0.749 0.125 1.000" friction="0.000 0.000 0.000"/>
+        </body>
+    </body>
+</mujoco> 
