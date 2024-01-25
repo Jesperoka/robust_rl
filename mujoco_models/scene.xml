@@ -1,7 +1,14 @@
 <!-- test -->
 <mujoco model="scene">
     <compiler angle="radian" meshdir="meshes"/> <!-- TODO: configure compiler -->
-    <option integrator="RK4" timestep="0.001"/>
+    <option integrator="RK4" timestep="0.002" iterations="50" ls_iterations="25" tolerance="1e-8"/>
+    <option>
+        <flag eulerdamp="enable" contact="enable" passive="disable" frictionloss="disable" equality="disable"/>
+    </option>
+
+    <default class="wheel">
+        <!-- <geom friction="0"/> -->
+    </default>
 
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
@@ -12,6 +19,10 @@
         <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
         <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
         <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+        <texture name="zeus_car_texture" file="meshes/zeus_car_meshes/3DModel_LowPoly.png" type="2d"/>
+        <material name="zeus_car_material" texture="zeus_car_texture"/>
+        <mesh name="zeus_car_mesh" file="zeus_car_meshes/_3DModel_LowPoly.obj" scale="0.1 0.1 0.1"/>
     </asset>
 
     <!-- Scene -->
@@ -19,7 +30,7 @@
         <light pos="0 0 0" dir="0 0 -1" directional="true"/>
 
         <body name="ground" pos="0 0 0">
-            <geom name="ground_surface" size="0 0 0.05" type="plane" material="groundplane"/>
+            <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane" friction="0.001"/>
         </body>
 
         <include file="zeus_car.xml"/>
@@ -28,11 +39,23 @@
 
     <!-- Actuators -->
     <actuator>
-         <velocity ctrllimited="true" ctrlrange="-2 2" gear="1 0 0 0 0 0" kv="100" joint="car_center_of_mass" name="car_com"/>
+         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="100" joint="car_slider_x" name="car_vel_x"/>
+         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="100" joint="car_slider_y" name="car_vel_y"/>
+         <velocity ctrllimited="true" ctrlrange="-0.5 0.5" gear="1 0 0 0 0 0" kv="100" joint="car_hinge" name="car_ang_vel"/>
     </actuator>
 
+    <!-- <contact> -->
+    <!--     <pair geom1="wheel_fr" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
+    <!--     <pair geom1="wheel_fl" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
+    <!--     <pair geom1="wheel_br" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
+    <!--     <pair geom1="wheel_bl" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
+    <!-- </contact> -->
+
     <contact>
-        <pair geom1="target" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/>
+        <exclude body1="inner_target" body2="wheels"/>
+        <exclude body1="inner_target" body2="ground"/>
+        <exclude body1="zeus_car" body2="ground"/>
+        <exclude body1="wheels" body2="ground"/>
     </contact>
 
 </mujoco>
