@@ -1,26 +1,20 @@
 <mujoco>
 
-    <body name="zeus_car" pos="0 0 0.061">
+    <body name="zeus_car" pos="0 0 0">
 
         <joint name="car_slider_x" type="slide" pos="0 0 0" axis="1 0 0"/>
         <joint name="car_slider_y" type="slide" pos="0 0 0" axis="0 1 0"/>
         <joint name="car_hinge" type="hinge" pos="0 0 0" axis="0 0 1"/>
 
-        <geom name="car_mesh" type="mesh" mesh="zeus_car_mesh" material="zeus_car_material" pos="0 0 0.1" xyaxes="1 0 0 0 1 0"/> 
-        <geom name="target" pos="0 0 0.3" type="box" size="0.11 0.16 0.01" rgba="0.655 0.820 0.212 1.000"/>
+        <geom name="car_mesh" type="mesh" mesh="zeus_car_mesh" material="zeus_car_material" pos="0 0 0.06" xyaxes="1 0 0 0 1 0"/> 
 
+        <body name="target" pos="0 0 0.13">
 
-        <body name="inner_target" pos="0 0 0">
-            <geom pos="0 0 0.01" type="box" size="0.0725 0.05 0.0001" rgba="0.153 0.749 0.125 1.000"/>
-            <geom pos="0 0 0.011" type="box" size="0.0375 0.025 0.0001" rgba="0.953 0.149 0.125 1.000"/>
-        </body>
+            <!-- <geom name="calibration_box" pos="0 0 0" type="box" size="0.055 0.08 0.01" rgba="0.655 0.820 0.212 0.500"/> -->
+            <geom name="target_top" pos="0 0 0" type="box" size="0.09 0.09 0.0025"  material="aluminum"/>
+            <geom name="target_left" pos="0 0.055 -0.053" type="box" size="0.015 0.0025 0.0555" material="aluminum"/>
+            <geom name="target_right" pos="0 -0.055 -0.053" type="box" size="0.015 0.0025 0.0555" material="aluminum"/>
 
-        <body name="wheels" pos="0 0 0">
-            <!-- X points forward, Y points to the left w.r.t to the forward direction and z is up. -->
-            <geom name="wheel_fr" class="wheel" pos="0.14 -0.09 -0.035" type="sphere" size="0.03" rgba="0.753 0.149 0.825 1.000"/>
-            <geom name="wheel_fl" class="wheel" pos="0.14 0.09 -0.035" type="sphere" size="0.03" rgba="0.153 0.149 0.825 1.000"/>
-            <geom name="wheel_br" class="wheel" pos="-0.14 -0.09 -0.035" type="sphere" size="0.03" rgba="0.153 0.149 0.825 1.000"/>
-            <geom name="wheel_bl" class="wheel" pos="-0.14 0.09 -0.035" type="sphere" size="0.03" rgba="0.153 0.149 0.825 1.000"/>
         </body>
 
     </body>

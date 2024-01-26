@@ -1,6 +1,6 @@
 <!-- test -->
 <mujoco model="scene">
-    <compiler angle="radian" meshdir="meshes"/> <!-- TODO: configure compiler -->
+    <compiler angle="radian" meshdir="meshes" autolimits="true"/> 
     <option integrator="RK4" timestep="0.002" iterations="50" ls_iterations="25" tolerance="1e-8"/>
     <option>
         <flag eulerdamp="enable" contact="enable" passive="disable" frictionloss="disable" equality="disable"/>
@@ -19,43 +19,84 @@
         <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
         <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
         <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+        <material name="matte_aluminum" rgba="0.75 0.75 0.75 1" reflectance="0.4" specular="0.3"/>   
+        <material name="aluminum" emission="0.5" specular="0.2" shininess="0.7" reflectance="0.2" rgba="0.6 0.6 0.6 1"/>
+        <material name="black_plastic" rgba="0.2 0.2 0.2 1" reflectance="0.3" specular="0.3"/>
 
         <texture name="zeus_car_texture" file="meshes/zeus_car_meshes/3DModel_LowPoly.png" type="2d"/>
         <material name="zeus_car_material" texture="zeus_car_texture"/>
-        <mesh name="zeus_car_mesh" file="zeus_car_meshes/_3DModel_LowPoly.obj" scale="0.1 0.1 0.1"/>
+        <mesh name="zeus_car_mesh" file="zeus_car_meshes/_3DModel_LowPoly.obj" scale="0.0645 0.0645 0.0645"/>
     </asset>
+
+    <include file="panda_extras.xml"/>
 
     <!-- Scene -->
     <worldbody>
-        <light pos="0 0 0" dir="0 0 -1" directional="true"/>
 
+        <light pos="0 0 2.5" dir="0 0 -1" directional="true"/>
         <body name="ground" pos="0 0 0">
             <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane" friction="0.001"/>
         </body>
 
-        <include file="zeus_car.xml"/>
+
+        <body name="robot_stand" pos="0 0 0">
+
+            <!-- TODO: change away from cylinder because MJX doesn't support it -->
+            <geom name="stand_cylinder_top" pos="-0.043 0 0.905" size="0.115 0.005" type="cylinder" material="matte_aluminum"/>
+            <geom name="stand_cylinder_middle" pos="-0.043 0 0.455" size="0.07 0.445" type="cylinder" material="matte_aluminum"/>
+            <geom name="stand_cylinder_bottom" pos="-0.043 0 0.005" size="0.31 0.005" type="cylinder" material="matte_aluminum"/>
+
+            <body name="stand_top" pos="0 0 0.905">
+                <include file="panda_body.xml"/>
+            </body>
+
+        </body>
+
+        <body name="driving_surface" pos="1.1 0 0.0">
+            <body name="driving_surface_top" pos="0 0 0.1">
+                <include file="zeus_car.xml"/>
+                <geom pos="0 0 0" size="1 1 0.01" type="box" material="black_plastic"/>
+            </body>
+            <geom pos="0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic"/>
+            <geom pos="0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic"/>
+            <geom pos="-0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic"/>
+            <geom pos="-0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic"/>
+        </body>
 
     </worldbody>
 
     <!-- Actuators -->
     <actuator>
-         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="100" joint="car_slider_x" name="car_vel_x"/>
-         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="100" joint="car_slider_y" name="car_vel_y"/>
-         <velocity ctrllimited="true" ctrlrange="-0.5 0.5" gear="1 0 0 0 0 0" kv="100" joint="car_hinge" name="car_ang_vel"/>
+         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8" joint="car_slider_x" name="car_vel_x"/>
+         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8" joint="car_slider_y" name="car_vel_y"/>
+         <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8" joint="car_hinge" name="car_ang_vel"/>
     </actuator>
 
-    <!-- <contact> -->
-    <!--     <pair geom1="wheel_fr" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
-    <!--     <pair geom1="wheel_fl" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
-    <!--     <pair geom1="wheel_br" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
-    <!--     <pair geom1="wheel_bl" geom2="ground_surface" condim="3" friction="0.00000001 0.00000001"/> -->
-    <!-- </contact> -->
-
+    <!-- Contact Exclusions -->
     <contact>
-        <exclude body1="inner_target" body2="wheels"/>
-        <exclude body1="inner_target" body2="ground"/>
+        <exclude body1="target" body2="zeus_car"/>
+        <exclude body1="target" body2="ground"/>
         <exclude body1="zeus_car" body2="ground"/>
-        <exclude body1="wheels" body2="ground"/>
+        <exclude body1="zeus_car" body2="driving_surface"/>
+        <exclude body1="zeus_car" body2="driving_surface_top"/>
+
+        <exclude body1="robot_stand" body2="ground"/>
+        <exclude body1="robot_stand" body2="driving_surface"/>
+        <exclude body1="robot_stand" body2="driving_surface_top"/>
+        <exclude body1="robot_stand" body2="zeus_car"/>
+        <exclude body1="robot_stand" body2="target"/>
+
+        <exclude body1="robot_stand" body2="link0"/>
+        <exclude body1="robot_stand" body2="link1"/>
+        <exclude body1="robot_stand" body2="link2"/>
+        <exclude body1="robot_stand" body2="link3"/>
+        <exclude body1="robot_stand" body2="link4"/>
+        <exclude body1="robot_stand" body2="link5"/>
+        <exclude body1="robot_stand" body2="link6"/>
+        <exclude body1="robot_stand" body2="link7"/>
+        <exclude body1="robot_stand" body2="hand"/>
+        <exclude body1="robot_stand" body2="left_finger"/>
+        <exclude body1="robot_stand" body2="right_finger"/>
     </contact>
 
 </mujoco>
