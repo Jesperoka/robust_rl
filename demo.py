@@ -14,6 +14,10 @@ from mujoco import mjx
 SCENE = "./mujoco_models/scene.xml"
 
 
+# @jax.jit
+# def ctrl_from_action(v: float, theta: float, omega, joint_angles: list) -> jnp.ndarray:
+#     return jnp.array([*joint_angles, v*jax.lax.cos(theta), v*jax.lax.sin(theta), omega])
+
 @jax.jit
 def ctrl_from_action(v: float, theta: float, omega, joint_angles: list) -> jnp.ndarray:
     return jnp.array([*joint_angles, v*jax.lax.cos(theta), v*jax.lax.sin(theta), omega])
@@ -30,16 +34,19 @@ if __name__ == "__main__":
     data = mj.MjData(model)
     renderer = mujoco.Renderer(model)
 
-    # viewer = mj.viewer.launch(model, data)
+    viewer = mj.viewer.launch(model, data)
+    input("input()")
 
     mj.mj_resetData(model, data)
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.put_data(model, data)
 
     print("local_devices: ", jax.local_devices())
-    print("jitting step function")
+    print("jitting")
     joint_angles=[0.0, -0.688, 0, -1.78, 0, 1.09, -2.32]
     mjx_data = step(mjx_model, mjx_data, 0.0, 0.0, 0.0, joint_angles)
+    get_data = jax.jit(mjx.get_data)
+    update_scene = jax.jit(renderer.update_scene)
     print("done jitting")
 
     frames = []
@@ -62,6 +69,8 @@ if __name__ == "__main__":
             renderer.update_scene(data)
             frames.append([ax.imshow(renderer.render(), animated=True)])
             i += 1
+
+    renderer.close()
 
     animation = ani.ArtistAnimation(fig, frames, interval=1.2, repeat_delay=1000)
     plt.show()    

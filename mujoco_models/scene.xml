@@ -3,7 +3,7 @@
     <compiler angle="radian" meshdir="meshes" autolimits="true"/> 
     <option integrator="RK4" timestep="0.002" iterations="50" ls_iterations="25" tolerance="1e-8"/>
     <option>
-        <flag eulerdamp="enable" contact="enable" passive="disable" frictionloss="disable" equality="disable"/>
+        <flag eulerdamp="enable" contact="disable" passive="disable" frictionloss="disable" equality="disable"/>
     </option>
 
     <default class="wheel">
