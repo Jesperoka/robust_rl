@@ -1,9 +1,9 @@
 <!-- test -->
 <mujoco model="scene">
     <compiler angle="radian" meshdir="meshes" autolimits="true"/> 
-    <option integrator="RK4" timestep="0.002" iterations="50" ls_iterations="25" tolerance="1e-8"/>
+    <option integrator="Euler" solver="Newton" timestep="0.002" iterations="1" ls_iterations="1" tolerance="1e-8"/>
     <option>
-        <flag eulerdamp="enable" contact="disable" passive="disable" frictionloss="disable" equality="disable"/>
+        <flag eulerdamp="disable" contact="disable" passive="disable" frictionloss="disable" equality="disable"/>
     </option>
 
     <default class="wheel">
@@ -37,7 +37,6 @@
         <body name="ground" pos="0 0 0">
             <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane" friction="0.001"/>
         </body>
-
 
         <body name="robot_stand" pos="0 0 0">
 
