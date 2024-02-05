@@ -1,2 +1,4 @@
 default_fqbn: arduino:avr:uno
 default_port: /dev/ttyACM0
+libraries:
+  - SoftPWM (1.0.1)

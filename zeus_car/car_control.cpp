@@ -7,6 +7,12 @@
 #define MOTOR_POWER_MAX 255
 #define MOTOR_START_POWER 100
 
+#define MOTOR_PINS                                                             \
+    (uint8_t[8]) { 3, 4, 5, 6, A3, A2, A1, A0 }
+
+/** Set the positive and negative directions for the motors */
+#define MOTOR_DIRECTIONS                                                       \
+    (uint8_t[4]) { 1, 0, 0, 1 }
 
 int32_t _lastError = 0;
 int32_t errorIntegral = 0;
