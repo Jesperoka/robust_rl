@@ -26,7 +26,7 @@ void rgb_write(uint8_t r, uint8_t g, uint8_t b) {
     g = 255 - g;
     b = 255 - b;
   #endif
-  // set volatge 
+  // set volatge
   SoftPWMSet(RGB_PINS[0], r);
   SoftPWMSet(RGB_PINS[1], g);
   SoftPWMSet(RGB_PINS[2], b);

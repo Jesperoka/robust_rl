@@ -3,18 +3,12 @@
 
 #include <Arduino.h>
 
-/** Indicate whether RGB leds are common-anodes or not 
- * - 0 common cathode
- * - 1 common anode
-*/
+// Indicate whether RGB leds are common-anodes or not
+//  0 common cathode, 1 common anode
 #define COMMON_ANODE 0
 
-/** Set the pins of RGB leds, the order is R,G,B */
 #define RGB_PINS (uint8_t[3]){12, 13, 11}
 
-/**
- *@name Defines the hexadecimal value of the color
- */
 #define RED           0xFF0202
 #define ORANGE        0xFFA500
 #define YELLOW        0xFFFF0A
@@ -28,7 +22,7 @@
 #define VOILET        0xFF0AFF
 #define MAGENTA       0xFF0AA5
 
-/* Calibrate brightness */
+// Calibrate brightness
 #define R_OFFSET  1.0
 #define G_OFFSET  0.16
 #define B_OFFSET  0.30
