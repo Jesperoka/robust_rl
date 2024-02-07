@@ -4,15 +4,17 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+static const unsigned char WS_BUFFER_SIZE = 200; // Assuming the buffer size will not exceed 255
+
 class Esp32Listener {
     public:
         bool ws_connected = false;
-        char receive_buffer[WS_BUFFER_SIZE];
-        StaticJsonDocument<200> send_doc; // NOTE: this is the same size as the receive buffer, is that a coincidence?
+        char rx_buffer[WS_BUFFER_SIZE];
+        StaticJsonDocument<WS_BUFFER_SIZE> send_doc; // NOTE: this is the same size as the receive buffer, is that a coincidence?
 
         Esp32Listener(const char *ssid, const char *password, const char *wifi_mode, const char *ws_port);
 
-        void read_into(char *buffer); // TODO: rename
+        const char* read_serial(const uint8_t buffer_length, const char start_marker, const char end_marker);
         void loop(); // TODO: rename
         void send_data();
 

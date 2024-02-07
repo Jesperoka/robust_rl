@@ -1,21 +1,20 @@
 #include "esp32_listener.h"
 
-#define SERIAL_TIMEOUT 100
-#define WS_BUFFER_SIZE 200
+static const unsigned char SERIAL_TIMEOUT = 100; // Assuming the timeout will not exceed 255
 
 // Some keywords for communication with ESP32-CAM
-#define CHECK "SC"
-#define OK_FLAG "[OK]"
-#define ERROR_FLAG "[ERR]"
-#define WS_HEADER "WS+"
-#define CAM_INIT "[Init]"
-#define WS_CONNECT "[CONNECTED]"
-#define WS_DISCONNECT "[DISCONNECTED]"
-#define APP_STOP "[APPSTOP]"
+static const char* const CHECK = "SC";
+static const char* const OK_FLAG = "[OK]";
+static const char* const ERROR_FLAG = "[ERR]";
+static const char* const WS_HEADER = "WS+";
+static const char* const CAM_INIT = "[Init]";
+static const char* const WS_CONNECT = "[CONNECTED]";
+static const char* const WS_DISCONNECT = "[DISCONNECTED]";
+static const char* const APP_STOP = "[APPSTOP]";
 
-#define WIFI_MODE_NONE "0"
-#define WIFI_MODE_STA "1"
-#define WIFI_MODE_AP "2"
+static const char* const WIFI_MODE_NONE = "0";
+static const char* const WIFI_MODE_STA = "1";
+static const char* const WIFI_MODE_AP = "2";
 
 // TODO: remove these and use string.h functions
 // Functions for manipulating strings
@@ -63,30 +62,29 @@ Esp32Listener::Esp32Listener(const char* ssid, const char* password, const char*
 
 // Receive and process serial port data in a loop
 void Esp32Listener::loop() {
-    // TODO: rewrite read_into/read_serial
-    read_into(recvBuffer);
 
-    if (strlen(recvBuffer) != 0) {
-        // Serial.print("recv: ");Serial.println(recvBuffer);
+    const char* rx_buffer = read_serial(WS_BUFFER_SIZE, '<', '>');
+
+    if (strlen(rx_buffer) != 0) {
 
         // ESP32-CAM reboot detection
-        if (IsStartWith(recvBuffer, CAM_INIT)) {
+        if (IsStartWith(rx_buffer, CAM_INIT)) {
             Serial.println(F("ESP32-CAM reboot detected"));
             carStop();
             ws_connected = false; // first use
         }
         // ESP32-CAM websocket connected
-        else if (IsStartWith(recvBuffer, WS_CONNECT)) {
+        else if (IsStartWith(rx_buffer, WS_CONNECT)) {
             Serial.println(F("ESP32-CAM websocket connected"));
             ws_connected = true;
         }
         // ESP32-CAM websocket disconnected
-        else if (IsStartWith(recvBuffer, WS_DISCONNECT)) {
+        else if (IsStartWith(rx_buffer, WS_DISCONNECT)) {
             Serial.println(F("ESP32-CAM websocket disconnected"));
             ws_connected = false;
         }
         // ESP32-CAM APP_STOP
-        else if (IsStartWith(recvBuffer, APP_STOP)) {
+        else if (IsStartWith(rx_buffer, APP_STOP)) {
             if (ws_connected) {
                 Serial.println(F("APP STOP"));
             }
@@ -96,11 +94,12 @@ void Esp32Listener::loop() {
         // NOTE: this is where the actual received data gets handeled
 
         // recv WS+ data
-        else if (IsStartWith(recvBuffer, WS_HEADER)) {
+        else if (IsStartWith(rx_buffer, WS_HEADER)) {
             Serial.print("RX:");
-            Serial.println(recvBuffer);
+            Serial.println(rx_buffer);
             ws_connected = true;
-            this->substring(recvBuffer, strlen(WS_HEADER));
+            // TODO: need to do copy probably
+            this->substring(rx_buffer, strlen(WS_HEADER));
 
         }
         // send data
@@ -111,9 +110,32 @@ void Esp32Listener::loop() {
     }
 }
 
-void Esp32Listener::read_serial(char* buffer) {
-    // TODO: rewrite
+
+const char* Esp32Listener::read_serial(const uint8_t buffer_length, const char start_marker, const char end_marker) {
+    char rx_buffer[buffer_length];
+    bool in_progress = false;
+    
+    uint16_t i = 0;
+    while (Serial.available() > 0) {
+        char character = Serial.read();
+
+        if (character == start_marker) { 
+            in_progress = true; 
+        }
+
+        if (in_progress && character != start_marker && character != end_marker) {
+            rx_buffer[i] = character;
+            i++;
+        }
+
+        if (character == end_marker) {
+            return rx_buffer;
+        }
+    }
+
+    return rx_buffer;
 }
+
 
 // websocket received data processing
 void on_receive() {
@@ -169,7 +191,7 @@ void Esp32Listener::command(const char *command, const char *value, char *result
 
         uint32_t start_time = millis();
         while ((millis() - start_time) < cmd_timeout) {
-            read_into(recvBuffer);
+            char* rx_buffer = read_serial(WS_BUFFER_SIZE, '<', '>'); // WARNING: temporary (all of this is really)
 
             if (IsStartWith(recvBuffer, OK_FLAG)) {
                 is_ok = true;
