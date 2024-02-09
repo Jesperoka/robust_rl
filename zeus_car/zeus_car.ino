@@ -2,17 +2,12 @@
 #include <SoftPWM.h>
 #include "car_control.h"
 #include "esp32_listener.h"
+#include "rgb.h"
 
-//  Motor layout
-//
-//  [0]--|||--[1]
-//   |         |
-//   |         |
-//   |         |
-//   |         |
-//  [3]-------[2]
 
-// Constants
+// #define WIFI_MODE_NONE "0"
+// #define WIFI_MODE_STA "1"
+#define WIFI_MODE_AP "2"
 
 #define WIFI_MODE WIFI_MODE_AP
 #define SSID "Zeus_Car"
@@ -20,9 +15,8 @@
 #define PORT "8765"
 
 #define STANDBY 0
-#define ACT 0
+#define ACT 1
 
-// Globals
 Esp32Listener esp_listener = Esp32Listener(SSID, PASSWORD, WIFI_MODE, PORT);
 
 
@@ -32,16 +26,21 @@ void setup() {
     SoftPWMBegin();
     rgb_begin();
     rgb_write(ORANGE);
-    start_car();
-    esp_listener.begin(SSID, PASSWORD, WIFI_MODE, PORT);
-    esp_listener.set_on_receive(on_receive);
+    start_motors();
 }
 
-// Program loop
+
 void loop() {
-    Message message = esp_listener.listen();
-    Mode mode = message.mode;
-    Action action = message.action;
+    // Esp32Listener::Message message = esp_listener.listen();
+    // uint8_t mode = message.mode;
+    // Esp32Listener::Action action = message.action;
+
+    Esp32Listener::Action action = {
+        angle: 128,
+        magnitude: 0,
+    };
+
+    uint8_t mode = 1;
 
     switch (mode) {
 
@@ -53,19 +52,20 @@ void loop() {
             act(action);
             break;
     }
+
+    delay(1000);
 }
+ 
 
-
-// TODO: make standby functionality
 void standby() {
-    stop();
-    rgbWrite(PURPLE);
-    delay(100);
+    stop_motors();
+    rgb_write(PURPLE);
 }
 
-// TODO: make action functionality
-void act(Action action) {
-    move(action.angle, action.magnitude);
-    rgbWrite(GREEN);
+
+void act(Esp32Listener::Action action) {
+    move(action.angle, action.magnitude, 0);
+    rgb_write(GREEN);
 }
+
 

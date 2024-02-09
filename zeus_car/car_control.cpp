@@ -2,14 +2,14 @@
 #include <SoftPWM.h>
 
 #include "car_control.h"
+#include "car_constants.h"
 
 
-static const uint8_t MOTOR_POWER_MIN = 28; // NOTE: set to 73 for 20% min power // NOTE: why can't it be 0? is it an elevated zero?
-static const uint8_t MOTOR_POWER_MAX = 255; // NOTE: set to 210 for 80% max power
-static const uint8_t MOTOR_START_POWER = 100; // NOTE: should this be (MOTOR_POWER_MAX - MOTOR_POWER_MIN) / 2? i.e. 113.5
-static const uint8_t OMEGA_MIN = -100; // TODO: replace with the actual minimum possible omega
-static const uint8_t OMEGA_MAX = 100; // TODO: replace with the actual maximum possible omega
-
+constexpr uint8_t MOTOR_POWER_MIN = 28; // NOTE: set to 73 for 20% min power // NOTE: why can't it be 0? is it an elevated zero?
+constexpr uint8_t MOTOR_POWER_MAX = 255; // NOTE: set to 210 for 80% max power
+constexpr uint8_t MOTOR_START_POWER = 100; // NOTE: should this be (MOTOR_POWER_MAX - MOTOR_POWER_MIN) / 2? i.e. 113.5
+constexpr uint8_t OMEGA_MIN = -21; 
+constexpr uint8_t OMEGA_MAX = 21;
 
 //  Motor layout
 //
@@ -19,36 +19,38 @@ static const uint8_t OMEGA_MAX = 100; // TODO: replace with the actual maximum p
 //   |         |
 //   |         |
 //  [3]-------[2]
+constexpr uint8_t MOTOR_0_PIN[2]  = {3, 4};
+constexpr uint8_t MOTOR_1_PIN[2]  = {5, 6};
+constexpr uint8_t MOTOR_2_PIN[2]  = {A3, A2};
+constexpr uint8_t MOTOR_3_PIN[2]  = {A1, A0};
 
-static const uint8_t MOTOR_0_PIN[2]  = {3, 4};
-static const uint8_t MOTOR_1_PIN[2]  = {5, 6};
-static const uint8_t MOTOR_2_PIN[2]  = {A3, A2};
-static const uint8_t MOTOR_3_PIN[2]  = {A1, A0};
+constexpr uint8_t T_FADE = 100;
 
+#define CLAMP(val, limit) (((val) > (limit)) ? (limit) : (val))
 
-void start_car() {
+void start_motors() {
     SoftPWMSet(MOTOR_0_PIN[0], 0);
     SoftPWMSet(MOTOR_0_PIN[1], 0);
-    SoftPWMSetFadeTime(MOTOR_0_PIN[0], 100, 100);
-    SoftPWMSetFadeTime(MOTOR_0_PIN[1], 100, 100);
+    SoftPWMSetFadeTime(MOTOR_0_PIN[0], T_FADE, T_FADE);
+    SoftPWMSetFadeTime(MOTOR_0_PIN[1], T_FADE, T_FADE);
 
     SoftPWMSet(MOTOR_1_PIN[0], 0);
     SoftPWMSet(MOTOR_1_PIN[1], 0);
-    SoftPWMSetFadeTime(MOTOR_1_PIN[0], 100, 100);
-    SoftPWMSetFadeTime(MOTOR_1_PIN[1], 100, 100);
+    SoftPWMSetFadeTime(MOTOR_1_PIN[0], T_FADE, T_FADE);
+    SoftPWMSetFadeTime(MOTOR_1_PIN[1], T_FADE, T_FADE);
 
     SoftPWMSet(MOTOR_2_PIN[0], 0);
     SoftPWMSet(MOTOR_2_PIN[1], 0);
-    SoftPWMSetFadeTime(MOTOR_2_PIN[0], 100, 100);
-    SoftPWMSetFadeTime(MOTOR_2_PIN[1], 100, 100);
+    SoftPWMSetFadeTime(MOTOR_2_PIN[0], T_FADE, T_FADE);
+    SoftPWMSetFadeTime(MOTOR_2_PIN[1], T_FADE, T_FADE);
 
     SoftPWMSet(MOTOR_3_PIN[0], 0);
     SoftPWMSet(MOTOR_3_PIN[1], 0);
-    SoftPWMSetFadeTime(MOTOR_3_PIN[0], 100, 100);
-    SoftPWMSetFadeTime(MOTOR_3_PIN[1], 100, 100);
+    SoftPWMSetFadeTime(MOTOR_3_PIN[0], T_FADE, T_FADE);
+    SoftPWMSetFadeTime(MOTOR_3_PIN[1], T_FADE, T_FADE);
 }
 
-void stop_car() {
+void stop_motors() {
     SoftPWMSet(MOTOR_0_PIN[0], 0);
     SoftPWMSet(MOTOR_0_PIN[1], 0);
     SoftPWMSet(MOTOR_1_PIN[0], 0);
@@ -60,81 +62,54 @@ void stop_car() {
 }
 
 
-// https://journals.sagepub.com/doi/10.1177/02783649241228607
-// alpha_1,4 = 135 deg
-// alpha_2,3 = 45 deg
-// gamma_1,4 = alpha_1,4 - 90 deg = 45 deg
-// gamma_2,3 = 90 deg  - alpha_2,3 = 45 deg
-// R = wheel radius = 0.03 m
-// L = half length of wheel front-back distance (from wheel center) = TODO: measure properly
-// W = half length of wheel left-right distance (from wheel inner edge) = TODO: measure properly
-// W_w = wheel width = TODO: measure properly
-// W_t = W + W_w = TODO: measure properly
+// https://journals.sagepub.com/doi/10.1177/02783649241228607 
+// Arguments are indices to lookup tables
+WheelSpeeds mecanum_inverse_kinematics(uint8_t angle, uint8_t velocity, int8_t rot_vel) {
+    angle = CLAMP(angle, ANGLE_DISCRETIZATION - 1);
+    velocity = CLAMP(velocity, MAGNITUDE_DISCRETIZATION - 1);
+    rot_vel = CLAMP(rot_vel, ROTATIONAL_VELOCITY_DISCRETIZATION - 1);
 
+    const float v = VALID_MAGNITUDES[velocity];
+    const float sin_phi = VALID_SINES[angle];
+    const float cos_phi = VALID_COSINES[angle];
+    const float omega_z = VALID_ROTATIONAL_VELOCITIES[rot_vel];
 
-int16_t* mecanum_inverse_kinematics(int8_t angle, int8_t magnitude, int8_t rot_vel) {
-    // TODO: precompute after measuring W_t and L (and R for good measure).
-    const float R = 0.03; // wheel radius
-    const float L = 0.11; // half length of wheel front-back distance (from wheel center)
-    const float W_t = 0.16; // half length of wheel left-right distance (from wheel inner edge)
+    const WheelSpeeds wheel_speeds = {
+        front_left:     v * (KI_11 * cos_phi + KI_12 * sin_phi) + KI_13 * omega_z,
+        front_right:    v * (KI_21 * cos_phi + KI_22 * sin_phi) + KI_23 * omega_z,
+        back_right:     v * (KI_31 * cos_phi + KI_32 * sin_phi) + KI_33 * omega_z,
+        back_left:      v * (KI_41 * cos_phi + KI_42 * sin_phi) + KI_43 * omega_z,
+    };
 
-    float KI_11 = (2.0/R)*0.5;                // = 1/R
-    float KI_12 = (2.0/R)*0.5;                // = 1/R
-    float KI_13 = (2.0/R)*(-0.5)*(W_t + L);   // = -1/R*(W_t + L)
-    float KI_21 = (2.0/R)*0.5;                // = 1/R
-    float KI_22 = (2.0/R)*(-0.5);             // = -1/R
-    float KI_23 = (2.0/R)*0.5*(W_t + L);      // = (W_t + L)/R
-    float KI_31 = (2.0/R)*0.5;                // = 1/R
-    float KI_32 = (2.0/R)*(-0.5);             // = -1/R
-    float KI_33 = (2.0/R)*(-0.5)*(W_t + L);   // = -1/R*(W_t + L)
-    float KI_41 = (2.0/R)*0.5;                // = 1/R
-    float KI_42 = (2.0/R)*0.5;                // = 1/R
-    float KI_43 = (2.0/R)*0.5*(W_t + L);      // = (W_t + L)/R
-
-    // TODO: Get precomputed values
-    float cos_angle = cos(angle); // valid_cosines[angle];
-    float sin_angle = sin(angle); // valid_sines[angle];
-    float rotation = rot_vel;   // valid_rotations[rot_vel];
-
-    // TODO: precompute the maxium omega value of any given wheel.
-
-    // Calculate the wheel speeds
-    float omega_0 = magnitude * (KI_11 * cos_angle + KI_12 * sin_angle) + KI_13 * rotation;
-    float omega_1 = magnitude * (KI_21 * cos_angle + KI_22 * sin_angle) + KI_23 * rotation;
-    float omega_2 = magnitude * (KI_31 * cos_angle + KI_32 * sin_angle) + KI_33 * rotation;
-    float omega_3 = magnitude * (KI_41 * cos_angle + KI_42 * sin_angle) + KI_43 * rotation;
-
-    return {omega_0, omega_1, omega_2, omega_3};
+    return wheel_speeds;
 }
 
+void set_motors(WheelSpeeds wheel_speeds) {
+    bool positive;
 
-// Sets the pin PWM values for the motors based on the wheel speeds
-void set_motors(int8_t omega_0, int8_t omega_1, int8_t omega_2, int8_t omega_3) {
-    // Map wheel speeds to motor pin values
-    int8_t front_left_power = map(omega_0, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    int8_t front_right_power = map(omega_1, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    int8_t back_right_power = map(omega_2, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    int8_t back_left_power = map(omega_3, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t front_left_power = map(wheel_speeds.front_left, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t front_right_power = map(wheel_speeds.front_right, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t back_right_power = map(wheel_speeds.back_right, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t back_left_power = map(wheel_speeds.back_left, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
 
-    bool positive = omega_0 > 0;
-    SoftPWMSet(MOTOR_0_PIN[0], !positive*front_left_power);
+    positive = wheel_speeds.front_left > 0;
+    SoftPWMSet(MOTOR_0_PIN[0], (not positive)*front_left_power);
     SoftPWMSet(MOTOR_0_PIN[1], positive*front_left_power);
-
-    bool positive = omega_3 > 0;
-    SoftPWMSet(MOTOR_3_PIN[0], !positive*back_left_power);
+    positive = wheel_speeds.back_left > 0;
+    SoftPWMSet(MOTOR_3_PIN[0], (not positive)*back_left_power);
     SoftPWMSet(MOTOR_3_PIN[1], positive*back_left_power);
 
-    bool positive = omega_1 > 0;
+    positive = wheel_speeds.front_right > 0;
     SoftPWMSet(MOTOR_1_PIN[0], positive*front_right_power);
-    SoftPWMSet(MOTOR_1_PIN[1], !positive*front_right_power);
-
-    bool positive = omega_2 > 0;
+    SoftPWMSet(MOTOR_1_PIN[1], (not positive)*front_right_power);
+    positive = wheel_speeds.back_right > 0;
     SoftPWMSet(MOTOR_2_PIN[0], positive*back_right_power);
-    SoftPWMSet(MOTOR_2_PIN[1], !positive*back_right_power);
+    SoftPWMSet(MOTOR_2_PIN[1], (not positive)*back_right_power);
+}
+
+void move(uint8_t angle, uint8_t power, uint8_t rot_vel) {
+    WheelSpeeds wheel_speeds = mecanum_inverse_kinematics(angle, power, rot_vel);
+    set_motors(wheel_speeds);
 }
 
 
-void move(int8_t angle, int8_t power, int8_t rot_vel = 0) {
-    int16_t* omega[4] = mecanum_inverse_kinematics(angle, power, rot_vel);
-    set_motors(omega[0], omega[1], omega[2], omega[3]);
-}

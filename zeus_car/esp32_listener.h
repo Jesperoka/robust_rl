@@ -4,32 +4,38 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
-static const unsigned char WS_BUFFER_SIZE = 200; // Assuming the buffer size will not exceed 255
 
 class Esp32Listener {
     public:
-        bool ws_connected = false;
-        char rx_buffer[WS_BUFFER_SIZE];
-        StaticJsonDocument<WS_BUFFER_SIZE> send_doc; // NOTE: this is the same size as the receive buffer, is that a coincidence?
+        typedef struct {
+            uint8_t angle;
+            uint8_t magnitude;
+        } Action;
+
+        typedef struct {
+            Action action;
+            uint8_t mode;
+        } Message;
 
         Esp32Listener(const char *ssid, const char *password, const char *wifi_mode, const char *ws_port);
 
-        const char* read_serial(const uint8_t buffer_length, const char start_marker, const char end_marker);
-        void loop(); // TODO: rename
-        void send_data();
-
-        void set(const char *command);
-        void set(const char *command, const char *value);
-        void get(const char *command, char *result);
-        void get(const char *command, const char *value, char *result);
+        Message listen(); 
 
     private:
-        void command(const char *command, const char *value, char *result); // TODO: rename
-        void substring(char *str, int16_t start, int16_t end = -1);
+        constexpr static uint32_t WS_SEND_INTERVAL = 60;
+        constexpr static uint8_t WS_BUFFER_SIZE =  200;
+        static uint32_t ws_send_time;
+        // StaticJsonDocument<200> send_doc;
 
-        // TODO: rename after rewrite
-        void getStrOf(char *str, uint8_t index, char *result, char divider);
-        void setStrOf(char *str, uint8_t index, String value, char divider = ';');
+        typedef struct {
+            char data[WS_BUFFER_SIZE];
+            uint8_t length;
+        } Buffer;
+
+        Buffer read_serial(const char start_marker, const char end_marker);
+        Buffer write_serial(const char *command, const char *value, uint32_t cmd_timeout); 
+        void send_data(JsonDocument &json);
+        const Buffer left_strip(Buffer rx_buffer, uint8_t to_index);
 };
 
 #endif // __ESP_32_LISTENER_H__
