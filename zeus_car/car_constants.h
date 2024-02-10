@@ -90,11 +90,11 @@ constexpr float R = 0.03;           // wheel radius
 constexpr float L = 0.11;           // half length of front-back distance (between wheel centers)
 constexpr const float W_t = 0.16;   // half length of left-right distance (between wheel inner edges)
 
-constexpr float KI_11 =   1/R;               
+constexpr float KI_11 =   1.0/R;               
 constexpr float KI_12 =   KI_11;// 1/R;               
-constexpr float KI_13 = -(1/R)*(W_t + L); 
-constexpr float KI_21 =   1/R;
-constexpr float KI_22 = -(1/R);
+constexpr float KI_13 = -(1.0/R)*(W_t + L); 
+constexpr float KI_21 =   1.0/R;
+constexpr float KI_22 = -(1.0/R);
 constexpr float KI_23 =  (1/R)*(W_t + L);
 constexpr float KI_31 =   1/R;
 constexpr float KI_32 = -(1/R);

@@ -25,10 +25,12 @@ void setup() {
     SoftPWMBegin();
     rgb_begin();
     rgb_write(ORANGE);
+    Serial.begin(115200);
     // esp_listener.init(SSID, PASSWORD, WIFI_MODE, PORT);
     rgb_write(CYAN);
     start_motors();
     start_signal();
+    Serial.println("Setup done");
 }
 
 
@@ -37,42 +39,64 @@ void loop() {
     // uint8_t mode = message.mode;
     // Esp32Listener::Action action = message.action;
 
+    standby();
+    delay(4000);
+
     Esp32Listener::Action action = {
         angle: 128,
-        magnitude: 3,
+        magnitude: 15,
     };
 
-    // uint8_t mode = 0;
+    uint8_t mode = 1;
 
-    // switch (mode) {
+    switch (mode) {
 
-    //     case STANDBY:
-    //         standby();
-    //         break;
+        case STANDBY:
+            standby();
+            break;
 
-    //     case ACT:
-    //         act(action);
-    //         break;
-    // }
+        case ACT:
+            rgb_write(BLUE);
+            act(action);
+            delay(1000);
+            action = {
+                angle: 0,
+                magnitude: 15,
 
-    delay(2000);
-    rgb_write(GREEN); delay(20);
-    WheelSpeeds wheelspeeds = {
-        front_left: 0.0,
-        front_right: 5.0,
-        back_right: -5.0,
-        back_left: 0.0,
-    };  
-    set_motors(wheelspeeds);
-    delay(2000);
-    rgb_write(ORANGE); delay(20);
-    wheelspeeds = {
-        front_left: -5.0,
-        front_right: 0.0,
-        back_right: 0.0,
-        back_left: 5.0,
-    };  
-    set_motors(wheelspeeds);
+            };
+            rgb_write(RED);
+            act(action);
+            delay(1000);
+            action = {
+                angle: 255,
+                magnitude: 15,
+            };
+            rgb_write(GREEN);
+            act(action);
+            delay(1000);
+            action = {
+                angle: 25,
+                magnitude: 15,
+            };
+            rgb_write(PURPLE);
+            act(action);
+            delay(1000);
+            action = {
+                angle: 50,
+                magnitude: 15,
+            };
+            rgb_write(YELLOW);
+            act(action);
+            delay(1000);
+            action = {
+                angle: 200,
+                magnitude: 15,
+            };
+            rgb_write(CYAN);
+            act(action);
+            delay(1000);
+            break;
+    }
 }
  
 
@@ -84,8 +108,7 @@ void standby() {
 
 
 void act(Esp32Listener::Action action) {
-    rgb_write(GREEN);
-    delay(2000);   
+    // rgb_write(GREEN);
     move(action.angle, action.magnitude, 0);
 }
 

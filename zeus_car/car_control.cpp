@@ -72,17 +72,21 @@ WheelSpeeds mecanum_inverse_kinematics(uint8_t angle, uint8_t velocity, int8_t r
     velocity = CLAMP(velocity, MAGNITUDE_DISCRETIZATION - 1);
     rot_vel = CLAMP(rot_vel, ROTATIONAL_VELOCITY_DISCRETIZATION - 1);
 
-    const float v = VALID_MAGNITUDES[velocity];
+    // NOTE: remember this coefficient here
+    const float v = 0.1*VALID_MAGNITUDES[velocity];
     const float sin_phi = VALID_SINES[angle];
     const float cos_phi = VALID_COSINES[angle];
     const float omega_z = VALID_ROTATIONAL_VELOCITIES[rot_vel];
 
+    // TODO: figurue out the correct mapping from magnitude to OMEGA_MAX for different angles
+    // probably need to precompute a bunch of values and check correctness and scale.
     const WheelSpeeds wheel_speeds = {
-        front_left:     v * (KI_11 * cos_phi + KI_12 * sin_phi) + KI_13 * omega_z,
-        front_right:    v * (KI_21 * cos_phi + KI_22 * sin_phi) + KI_23 * omega_z,
-        back_right:     v * (KI_31 * cos_phi + KI_32 * sin_phi) + KI_33 * omega_z,
-        back_left:      v * (KI_41 * cos_phi + KI_42 * sin_phi) + KI_43 * omega_z,
+        front_left:     constrain(v * (KI_11 * cos_phi + KI_12 * sin_phi) + KI_13 * omega_z, -21, 21),
+        front_right:    constrain(v * (KI_21 * cos_phi + KI_22 * sin_phi) + KI_23 * omega_z, -21, 21),
+        back_right:     constrain(v * (KI_31 * cos_phi + KI_32 * sin_phi) + KI_33 * omega_z, -21, 21),
+        back_left:      constrain(v * (KI_41 * cos_phi + KI_42 * sin_phi) + KI_43 * omega_z, -21, 21),
     };
+
 
     return wheel_speeds;
 }
