@@ -25,20 +25,18 @@ constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
 // #define WIFI_MODE_AP "2"
 // --------------------------------------------------
 
-
-
 #define starts_with(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
 
 
-Esp32Listener::Esp32Listener(const char* ssid, const char* password, const char* wifi_mode, const char* ws_port) {
+void Esp32Listener::init(const char* ssid, const char* password, const char* wifi_mode, const char* ws_port) {
     Serial.begin(115200);
 
-    uint32_t cmd_timeout = 3000;
+    uint32_t cmd_timeout = 1500; // 3000
     Buffer version = write_serial("RESET", "", cmd_timeout);
     Serial.print(F("ESP32 firmware version "));
     Serial.println(version.data);
 
-    cmd_timeout = 1000;
+    cmd_timeout = 500; // 1000
     write_serial("TYPE", "custom", cmd_timeout);
     write_serial("NAME", "my_zeus_car", cmd_timeout);
     write_serial("SSID", ssid, cmd_timeout);
@@ -46,7 +44,7 @@ Esp32Listener::Esp32Listener(const char* ssid, const char* password, const char*
     write_serial("MODE", wifi_mode, cmd_timeout);
     write_serial("PORT", ws_port, cmd_timeout);
 
-    cmd_timeout = 5000;
+    cmd_timeout = 2500; // 5000
     Buffer ip_addr = write_serial("START", "", cmd_timeout);
     delay(20); // TODO: check if necessary and/or wait for an actual confirmation
     Serial.print(F("WebServer started on ws://"));

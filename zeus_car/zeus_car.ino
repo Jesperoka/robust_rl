@@ -17,16 +17,18 @@
 #define STANDBY 0
 #define ACT 1
 
-Esp32Listener esp_listener = Esp32Listener(SSID, PASSWORD, WIFI_MODE, PORT);
+
+Esp32Listener esp_listener;
 
 
 void setup() {
-    Serial.begin(115200);
-    Serial.println("Initializing zeus_car");
     SoftPWMBegin();
     rgb_begin();
     rgb_write(ORANGE);
+    // esp_listener.init(SSID, PASSWORD, WIFI_MODE, PORT);
+    rgb_write(CYAN);
     start_motors();
+    start_signal();
 }
 
 
@@ -37,35 +39,53 @@ void loop() {
 
     Esp32Listener::Action action = {
         angle: 128,
-        magnitude: 0,
+        magnitude: 3,
     };
 
-    uint8_t mode = 1;
+    // uint8_t mode = 0;
 
-    switch (mode) {
+    // switch (mode) {
 
-        case STANDBY:
-            standby();
-            break;
+    //     case STANDBY:
+    //         standby();
+    //         break;
 
-        case ACT:
-            act(action);
-            break;
-    }
+    //     case ACT:
+    //         act(action);
+    //         break;
+    // }
 
-    delay(1000);
+    delay(2000);
+    rgb_write(GREEN); delay(20);
+    WheelSpeeds wheelspeeds = {
+        front_left: 0.0,
+        front_right: 5.0,
+        back_right: -5.0,
+        back_left: 0.0,
+    };  
+    set_motors(wheelspeeds);
+    delay(2000);
+    rgb_write(ORANGE); delay(20);
+    wheelspeeds = {
+        front_left: -5.0,
+        front_right: 0.0,
+        back_right: 0.0,
+        back_left: 5.0,
+    };  
+    set_motors(wheelspeeds);
 }
  
 
 void standby() {
     stop_motors();
     rgb_write(PURPLE);
+    delay(1000);   
 }
 
 
 void act(Esp32Listener::Action action) {
-    move(action.angle, action.magnitude, 0);
     rgb_write(GREEN);
+    delay(2000);   
+    move(action.angle, action.magnitude, 0);
 }
-
 

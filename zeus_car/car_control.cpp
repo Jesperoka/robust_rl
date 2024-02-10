@@ -5,7 +5,7 @@
 #include "car_constants.h"
 
 
-constexpr uint8_t MOTOR_POWER_MIN = 28; // NOTE: set to 73 for 20% min power // NOTE: why can't it be 0? is it an elevated zero?
+constexpr uint8_t MOTOR_POWER_MIN = 0; // NOTE: set to 73 for 20% min power // NOTE: why can't it be 0? is it an elevated zero?
 constexpr uint8_t MOTOR_POWER_MAX = 255; // NOTE: set to 210 for 80% max power
 constexpr uint8_t MOTOR_START_POWER = 100; // NOTE: should this be (MOTOR_POWER_MAX - MOTOR_POWER_MIN) / 2? i.e. 113.5
 constexpr uint8_t OMEGA_MIN = -21; 
@@ -19,10 +19,10 @@ constexpr uint8_t OMEGA_MAX = 21;
 //   |         |
 //   |         |
 //  [3]-------[2]
-constexpr uint8_t MOTOR_0_PIN[2]  = {3, 4};
-constexpr uint8_t MOTOR_1_PIN[2]  = {5, 6};
-constexpr uint8_t MOTOR_2_PIN[2]  = {A3, A2};
-constexpr uint8_t MOTOR_3_PIN[2]  = {A1, A0};
+constexpr int8_t MOTOR_0_PIN[2]  = {3, 4};
+constexpr int8_t MOTOR_1_PIN[2]  = {5, 6};
+constexpr int8_t MOTOR_2_PIN[2]  = {A3, A2};
+constexpr int8_t MOTOR_3_PIN[2]  = {A1, A0};
 
 constexpr uint8_t T_FADE = 100;
 
@@ -53,10 +53,13 @@ void start_motors() {
 void stop_motors() {
     SoftPWMSet(MOTOR_0_PIN[0], 0);
     SoftPWMSet(MOTOR_0_PIN[1], 0);
+
     SoftPWMSet(MOTOR_1_PIN[0], 0);
     SoftPWMSet(MOTOR_1_PIN[1], 0);
+    
     SoftPWMSet(MOTOR_2_PIN[0], 0);
     SoftPWMSet(MOTOR_2_PIN[1], 0);
+
     SoftPWMSet(MOTOR_3_PIN[0], 0);
     SoftPWMSet(MOTOR_3_PIN[1], 0);
 }
@@ -84,27 +87,53 @@ WheelSpeeds mecanum_inverse_kinematics(uint8_t angle, uint8_t velocity, int8_t r
     return wheel_speeds;
 }
 
+// Use with care, function expects output limits to be within uint8_t range
+const uint8_t _map(const float x, const float in_min, const float in_max, const float out_min, const float out_max) {
+    return (uint8_t)((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min - 1e-6);
+}
+
+
+void overcome_static_friction(bool positive_fl, bool positive_bl, bool positive_fr, bool positive_br) {
+    SoftPWMSet(MOTOR_0_PIN[0], (not positive_fl)*MOTOR_START_POWER);
+    SoftPWMSet(MOTOR_0_PIN[1], positive_fl*MOTOR_START_POWER);
+
+    SoftPWMSet(MOTOR_3_PIN[0], (not positive_bl)*MOTOR_START_POWER);
+    SoftPWMSet(MOTOR_3_PIN[1], positive_bl*MOTOR_START_POWER);
+
+    SoftPWMSet(MOTOR_1_PIN[0], (not positive_fr)*MOTOR_START_POWER);
+    SoftPWMSet(MOTOR_1_PIN[1], positive_fr*MOTOR_START_POWER);
+
+    SoftPWMSet(MOTOR_2_PIN[0], positive_br*MOTOR_START_POWER);
+    SoftPWMSet(MOTOR_2_PIN[1], (not positive_br)*MOTOR_START_POWER);
+
+    delayMicroseconds(10);
+}
+
 void set_motors(WheelSpeeds wheel_speeds) {
-    bool positive;
+    const uint8_t front_left_power = _map(abs(wheel_speeds.front_left), 0, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t front_right_power = _map(abs(wheel_speeds.front_right), 0, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t back_right_power = _map(abs(wheel_speeds.back_right), 0, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    const uint8_t back_left_power = _map(abs(wheel_speeds.back_left), 0, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
 
-    const uint8_t front_left_power = map(wheel_speeds.front_left, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    const uint8_t front_right_power = map(wheel_speeds.front_right, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    const uint8_t back_right_power = map(wheel_speeds.back_right, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
-    const uint8_t back_left_power = map(wheel_speeds.back_left, OMEGA_MIN, OMEGA_MAX, MOTOR_POWER_MIN, MOTOR_POWER_MAX);
+    bool positive_fl = wheel_speeds.front_left > 0;
+    bool positive_bl = wheel_speeds.back_left > 0;
+    bool positive_fr = wheel_speeds.back_left > 0;
+    bool positive_br = wheel_speeds.back_left > 0;
+    overcome_static_friction(positive_fl, positive_bl, positive_fr, positive_br);
 
-    positive = wheel_speeds.front_left > 0;
-    SoftPWMSet(MOTOR_0_PIN[0], (not positive)*front_left_power);
-    SoftPWMSet(MOTOR_0_PIN[1], positive*front_left_power);
-    positive = wheel_speeds.back_left > 0;
-    SoftPWMSet(MOTOR_3_PIN[0], (not positive)*back_left_power);
-    SoftPWMSet(MOTOR_3_PIN[1], positive*back_left_power);
+    // Left wheels
+    SoftPWMSet(MOTOR_0_PIN[0], (not positive_fl)*front_left_power);
+    SoftPWMSet(MOTOR_0_PIN[1], positive_fl*front_left_power);
 
-    positive = wheel_speeds.front_right > 0;
-    SoftPWMSet(MOTOR_1_PIN[0], positive*front_right_power);
-    SoftPWMSet(MOTOR_1_PIN[1], (not positive)*front_right_power);
-    positive = wheel_speeds.back_right > 0;
-    SoftPWMSet(MOTOR_2_PIN[0], positive*back_right_power);
-    SoftPWMSet(MOTOR_2_PIN[1], (not positive)*back_right_power);
+    SoftPWMSet(MOTOR_3_PIN[0], (not positive_bl)*back_left_power);
+    SoftPWMSet(MOTOR_3_PIN[1], positive_bl*back_left_power);
+
+    // Right wheels
+    SoftPWMSet(MOTOR_1_PIN[0], (not positive_fr)*front_right_power);
+    SoftPWMSet(MOTOR_1_PIN[1], positive_fr*front_right_power);
+
+    SoftPWMSet(MOTOR_2_PIN[0], positive_br*back_right_power);
+    SoftPWMSet(MOTOR_2_PIN[1], (not positive_br)*back_right_power);
 }
 
 void move(uint8_t angle, uint8_t power, uint8_t rot_vel) {

@@ -17,8 +17,7 @@ class Esp32Listener {
             uint8_t mode;
         } Message;
 
-        Esp32Listener(const char *ssid, const char *password, const char *wifi_mode, const char *ws_port);
-
+        void init(const char *ssid, const char *password, const char *wifi_mode, const char *ws_port);
         Message listen(); 
 
     private:

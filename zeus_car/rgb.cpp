@@ -36,3 +36,51 @@ void rgb_off() {
   rgb_write(0, 0, 0);
 }
 
+void start_signal() {
+    for (uint8_t i = 0; i < 3; i++) {
+        rgb_write(MAGENTA);
+        delay(10);
+        rgb_write(VIOLET);    
+        delay(10);
+        rgb_write(PURPLE);
+        delay(10);
+        rgb_write(BLUE);    
+        delay(10);
+        rgb_write(CYAN_BLUE);
+        delay(10);
+        rgb_write(CYAN);    
+        delay(10);
+        rgb_write(CYAN_GREEN);
+        delay(10);
+        rgb_write(GREEN);    
+        delay(10);
+        rgb_write(YELLOW_GREEN);    
+        delay(10);
+        rgb_write(YELLOW);    
+        delay(10);
+        rgb_write(ORANGE);    
+        delay(10);
+        rgb_write(RED);    
+        delay(10);
+        rgb_write(ORANGE);    
+        delay(10);
+        rgb_write(YELLOW);    
+        delay(10);
+        rgb_write(YELLOW_GREEN);    
+        delay(10);
+        rgb_write(GREEN);    
+        delay(10);
+        rgb_write(CYAN_GREEN);
+        delay(10);
+        rgb_write(CYAN);    
+        delay(10);
+        rgb_write(CYAN_BLUE);
+        delay(10);
+        rgb_write(BLUE);    
+        delay(10);
+        rgb_write(PURPLE);
+        delay(10);
+        rgb_write(VIOLET);    
+        delay(10);
+    }
+}
