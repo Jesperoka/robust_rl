@@ -2,7 +2,7 @@
 #define __ESP_32_LISTENER_H__
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.hpp>
 #include "typedefs.h"
 
 
@@ -22,7 +22,7 @@ class Esp32Listener {
         Buffer read_serial(const char start_marker, const char end_marker);
         Buffer write_serial(const char *command, const char *value, uint32_t cmd_timeout); 
         Message parse_message(Buffer& rx_buffer, const char* delimiter);
-        Buffer& left_strip(Buffer& rx_buffer, uint8_t to_index);
+        Buffer& strip_header(Buffer& rx_buffer, const char* delimiter);
 };
 
 #endif // __ESP_32_LISTENER_H__

@@ -3,7 +3,6 @@
 #include <SoftPWM.h>
 
 #include "car_control.h"
-#include "car_constants.h"
 
 // https://research.ijcaonline.org/volume113/number3/pxc3901586.pdf
 constexpr float R_INV = 1.0/0.03;   // reciprocal of wheel radius

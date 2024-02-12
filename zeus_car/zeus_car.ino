@@ -15,7 +15,7 @@
 #define PASSWORD "12345678"
 #define PORT "8765"
 
-#define LOOP_DELAY 100
+#define LOOP_DELAY 500
 
 
 #ifdef __arm__
@@ -44,7 +44,6 @@ void setup() {
     start_motors();
     rgb_begin();
     rgb_write(ORANGE);
-    Serial.begin(115200);
     esp_listener.init(SSID, PASSWORD, WIFI_MODE, PORT);
     start_signal();
 }
@@ -53,6 +52,10 @@ void setup() {
 void loop() {
     uint32_t time = millis();
     auto [action, mode] = esp_listener.listen();
+    Serial.println(action.angle);
+    Serial.println(action.velocity);
+    Serial.println(action.rot_vel);
+    Serial.println((int)mode);
 
     switch (mode) {
         case Mode::STANDBY:
@@ -63,6 +66,7 @@ void loop() {
         case Mode::ACT:
             move(action);
             rgb_write(GREEN);
+            delay(1000);
             break;
     }
 

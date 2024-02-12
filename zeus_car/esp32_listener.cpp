@@ -3,6 +3,7 @@
 #include "stdint.h"
 #include "esp32_listener.h"
 #include "typedefs.h"
+#include "rgb.h"
 
 constexpr unsigned char SERIAL_TIMEOUT = 100; // Assuming the timeout will not exceed 255
 constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
@@ -10,9 +11,9 @@ constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
 
 // Keywords for communication with ESP32-CAM firmware
 // --------------------------------------------------
-#define START_MARKER '<'
+#define START_MARKER 'W'
 #define END_MARKER '>'
-#define DELIMITER ","
+#define DELIMITER ";"
 // --------------------------------------------------
 #define OK_FLAG "[OK]"
 #define WS_HEADER "WS+"
@@ -54,9 +55,12 @@ Message Esp32Listener::listen() {
     Buffer rx_buffer = read_serial(START_MARKER, END_MARKER);
 
     if (rx_buffer.length != 0 and starts_with(rx_buffer.data, WS_HEADER)) {
-        return parse_message(left_strip(rx_buffer, strlen(WS_HEADER)), DELIMITER);
+        rx_buffer = strip_header(rx_buffer, '+'); // NOTE: hardcoded header delimiter
+        return parse_message(rx_buffer, DELIMITER);
     }
-    return Message{}; // NOTE: what to do here?
+    // NOTE: might need to add a third Mode for continuing the previous action
+    // (and I might also want to add a newest version counter)
+    return Message{}; 
 }
 
 
@@ -78,6 +82,7 @@ Message Esp32Listener::parse_message(Buffer& rx_buffer, const char* delimiter) {
     return message;
 }
 
+// TODO: fix markers
 // Example message: "<WS+ 45.0 0.7 1.1>"
 Esp32Listener::Buffer Esp32Listener::read_serial(const char start_marker, const char end_marker) {
     Buffer rx_buffer = {data: {}, length: 0};
@@ -90,7 +95,7 @@ Esp32Listener::Buffer Esp32Listener::read_serial(const char start_marker, const 
             in_progress = true; 
         }
 
-        if (in_progress and (character != start_marker) and (character != end_marker)) {
+        if (in_progress and (character != end_marker)) {
             rx_buffer.data[rx_buffer.length] = character;
             rx_buffer.length++;
         }
@@ -100,7 +105,7 @@ Esp32Listener::Buffer Esp32Listener::read_serial(const char start_marker, const 
             return rx_buffer;
         }
     }
-
+    rx_buffer.data[rx_buffer.length] = '\0';
     return rx_buffer;
 }
 
@@ -126,12 +131,12 @@ Esp32Listener::Buffer Esp32Listener::write_serial(const char *command, const cha
         while ((millis() - start_time) < cmd_timeout) {
 
             Buffer rx_buffer = read_serial(START_MARKER, END_MARKER);
+            rgb_write(RED);
+            // Serial.println(rx_buffer.data);
 
             if (starts_with(rx_buffer.data, OK_FLAG)) {
+                rx_buffer = strip_header(rx_buffer, ']'); // NOTE: hardcoded header delimiter
                 Serial.println(F(OK_FLAG));
-
-                // NOTE: I might not need this since I have START_MARKER and END_MARKER
-                rx_buffer = left_strip(rx_buffer, strlen(OK_FLAG)); 
                 return rx_buffer;
             }
         }
@@ -144,10 +149,14 @@ Esp32Listener::Buffer Esp32Listener::write_serial(const char *command, const cha
     return Buffer{};
 }
 
-
-// WARNING: need to double check that this works properly
-// NOTE: I might not need this since I have START_MARKER and END_MARKER
-Esp32Listener::Buffer& Esp32Listener::left_strip(Buffer& rx_buffer, uint8_t to_index) {
-    memmove(rx_buffer.data, rx_buffer.data + to_index, rx_buffer.length - to_index);
+Esp32Listener::Buffer& Esp32Listener::strip_header(Buffer& rx_buffer, const char* delimiter) {
+    char *delimiter_ptr = strchr(rx_buffer.data, delimiter);
+    if (delimiter_ptr != NULL) {
+        char *body_start = delimiter_ptr + 1;
+        size_t body_length = strlen(body_start);
+        memmove(rx_buffer.data, body_start, body_length + 1);
+        rx_buffer.length = body_length;
+    }
     return rx_buffer;
 }
+
