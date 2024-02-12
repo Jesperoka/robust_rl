@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <SoftPWM.h>
+#include "typedefs.h"
 #include "car_control.h"
 #include "esp32_listener.h"
 #include "rgb.h"
@@ -14,8 +15,25 @@
 #define PASSWORD "12345678"
 #define PORT "8765"
 
-#define STANDBY 0
-#define ACT 1
+#define LOOP_DELAY 100
+
+
+#ifdef __arm__
+extern "C" char* sbrk(int incr);
+#else  // __ARM__
+extern char *__brkval;
+#endif  // __arm__
+
+int freeMemory() {
+  char top;
+#ifdef __arm__
+  return &top - reinterpret_cast<char*>(sbrk(0));
+#elif defined(CORE_TEENSY) || (ARDUINO > 103 && ARDUINO != 151)
+  return &top - __brkval;
+#else  // __arm__
+  return __brkval ? &top - __brkval : &top - __malloc_heap_start;
+#endif  // __arm__
+}
 
 
 Esp32Listener esp_listener;
@@ -23,92 +41,35 @@ Esp32Listener esp_listener;
 
 void setup() {
     SoftPWMBegin();
+    start_motors();
     rgb_begin();
     rgb_write(ORANGE);
     Serial.begin(115200);
-    // esp_listener.init(SSID, PASSWORD, WIFI_MODE, PORT);
-    rgb_write(CYAN);
-    start_motors();
+    esp_listener.init(SSID, PASSWORD, WIFI_MODE, PORT);
     start_signal();
-    Serial.println("Setup done");
 }
 
 
 void loop() {
-    // Esp32Listener::Message message = esp_listener.listen();
-    // uint8_t mode = message.mode;
-    // Esp32Listener::Action action = message.action;
-
-    standby();
-    delay(4000);
-
-    Esp32Listener::Action action = {
-        angle: 128,
-        magnitude: 15,
-    };
-
-    uint8_t mode = 1;
+    uint32_t time = millis();
+    auto [action, mode] = esp_listener.listen();
 
     switch (mode) {
-
-        case STANDBY:
-            standby();
+        case Mode::STANDBY:
+            stop_motors();
+            rgb_write(PURPLE);
             break;
 
-        case ACT:
-            rgb_write(BLUE);
-            act(action);
-            delay(1000);
-            action = {
-                angle: 0,
-                magnitude: 15,
-
-            };
-            rgb_write(RED);
-            act(action);
-            delay(1000);
-            action = {
-                angle: 255,
-                magnitude: 15,
-            };
+        case Mode::ACT:
+            move(action);
             rgb_write(GREEN);
-            act(action);
-            delay(1000);
-            action = {
-                angle: 25,
-                magnitude: 15,
-            };
-            rgb_write(PURPLE);
-            act(action);
-            delay(1000);
-            action = {
-                angle: 50,
-                magnitude: 15,
-            };
-            rgb_write(YELLOW);
-            act(action);
-            delay(1000);
-            action = {
-                angle: 200,
-                magnitude: 15,
-            };
-            rgb_write(CYAN);
-            act(action);
-            delay(1000);
             break;
     }
+
+    while (millis() - time < LOOP_DELAY) {  }
 }
  
 
-void standby() {
-    stop_motors();
-    rgb_write(PURPLE);
-    delay(1000);   
-}
 
 
-void act(Esp32Listener::Action action) {
-    // rgb_write(GREEN);
-    move(action.angle, action.magnitude, 0);
-}
 

@@ -1,6 +1,8 @@
 #include "string.h"
+#include "stdlib.h"
 #include "stdint.h"
 #include "esp32_listener.h"
+#include "typedefs.h"
 
 constexpr unsigned char SERIAL_TIMEOUT = 100; // Assuming the timeout will not exceed 255
 constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
@@ -10,15 +12,10 @@ constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
 // --------------------------------------------------
 #define START_MARKER '<'
 #define END_MARKER '>'
+#define DELIMITER ","
 // --------------------------------------------------
-// #define CHECK "SC"
 #define OK_FLAG "[OK]"
-// #define ERROR_FLAG "[ERR]"
 #define WS_HEADER "WS+"
-#define CAM_INIT "[Init]"
-#define WS_CONNECT "[CONNECTED]"
-#define WS_DISCONNECT "[DISCONNECTED]"
-#define APP_STOP "[APPSTOP]"
 
 // #define WIFI_MODE_NONE "0"
 // #define WIFI_MODE_STA "1"
@@ -31,12 +28,12 @@ constexpr uint8_t SERIAL_WRITE_MAX_RETRIES = 3;
 void Esp32Listener::init(const char* ssid, const char* password, const char* wifi_mode, const char* ws_port) {
     Serial.begin(115200);
 
-    uint32_t cmd_timeout = 1500; // 3000
+    uint32_t cmd_timeout = 3000; 
     Buffer version = write_serial("RESET", "", cmd_timeout);
     Serial.print(F("ESP32 firmware version "));
     Serial.println(version.data);
 
-    cmd_timeout = 500; // 1000
+    cmd_timeout = 1000;
     write_serial("TYPE", "custom", cmd_timeout);
     write_serial("NAME", "my_zeus_car", cmd_timeout);
     write_serial("SSID", ssid, cmd_timeout);
@@ -44,70 +41,44 @@ void Esp32Listener::init(const char* ssid, const char* password, const char* wif
     write_serial("MODE", wifi_mode, cmd_timeout);
     write_serial("PORT", ws_port, cmd_timeout);
 
-    cmd_timeout = 2500; // 5000
+    cmd_timeout = 5000; 
     Buffer ip_addr = write_serial("START", "", cmd_timeout);
-    delay(20); // TODO: check if necessary and/or wait for an actual confirmation
     Serial.print(F("WebServer started on ws://"));
     Serial.print(ip_addr.data);
     Serial.print(F(":"));
     Serial.println(ws_port);
-
-    // ws_send_time = millis();
 }
 
 
-// Receive and process serial port data in a loop
-Esp32Listener::Message Esp32Listener::listen() {
-
+Message Esp32Listener::listen() {
     Buffer rx_buffer = read_serial(START_MARKER, END_MARKER);
 
-    if (rx_buffer.length != 0) {
-
-        // recv WS+ data
-        if (starts_with(rx_buffer.data, WS_HEADER)) {
-            // TODO: remove this and other simlar response messages
-            Serial.print("RX:");
-            Serial.println(rx_buffer.data);
-
-            rx_buffer = left_strip(rx_buffer, strlen(WS_HEADER));
-            
-
-
-
-            Action action = {
-                angle: rx_buffer.data[0],
-                magnitude: rx_buffer.data[1]
-            };
-
-            uint8_t mode = rx_buffer.data[2];
-
-            
-            return Message {action: action, mode: rx_buffer.data[2]}; 
-        }
-
-        // NOTE: don't really have any reason to send data
-        // // send data
-        // if (millis() - ws_send_time > WS_SEND_INTERVAL) {
-        //     this->send_data();
-        //     ws_send_time = millis();
-        // }
-
-        if (starts_with(rx_buffer.data, CAM_INIT)) {
-            Serial.println(F("ESP32-CAM reboot detected"));
-        }
-        else if (starts_with(rx_buffer.data, WS_CONNECT)) {
-            Serial.println(F("ESP32-CAM websocket connected"));
-        }
-        else if (starts_with(rx_buffer.data, WS_DISCONNECT)) {
-            Serial.println(F("ESP32-CAM websocket disconnected"));
-        }
-        else if (starts_with(rx_buffer.data, APP_STOP)) {
-            Serial.println(F("APP STOP"));
-        }
+    if (rx_buffer.length != 0 and starts_with(rx_buffer.data, WS_HEADER)) {
+        return parse_message(left_strip(rx_buffer, strlen(WS_HEADER)), DELIMITER);
     }
+    return Message{}; // NOTE: what to do here?
 }
 
 
+Message Esp32Listener::parse_message(Buffer& rx_buffer, const char* delimiter) {
+    Message message;
+
+    char* token = strtok(rx_buffer.data, delimiter);
+    message.action.angle = (token != NULL) ? atof(token) : 0.0;
+
+    token = strtok(NULL, delimiter);
+    message.action.velocity = (token != NULL) ? atof(token) : 0.0;
+
+    token = strtok(NULL, delimiter);
+    message.action.rot_vel = (token != NULL) ? atof(token) : 0.0;
+
+    token = strtok(NULL, delimiter);
+    message.mode = (token != NULL) ? (Mode)atoi(token) : Mode::STANDBY;
+
+    return message;
+}
+
+// Example message: "<WS+ 45.0 0.7 1.1>"
 Esp32Listener::Buffer Esp32Listener::read_serial(const char start_marker, const char end_marker) {
     Buffer rx_buffer = {data: {}, length: 0};
     bool in_progress = false;
@@ -134,16 +105,6 @@ Esp32Listener::Buffer Esp32Listener::read_serial(const char start_marker, const 
 }
 
 
-// NOTE: I don't really need this (except maybe for debugging)
-
-// Send data on serial port, prepends header (WS_HEADER)
-// void Esp32Listener::send_data(JsonDocument data) {
-//     Serial.print(F(WS_HEADER));
-//     serializeJson(data, Serial);
-//     Serial.print("\n");
-// }
-
-
 /**
  * @brief Send command to ESP32-CAM with serial
  * @param command command keyword: "TYPE", "NAME", "SSID", "PSK", "MODE", "PORT", "START", "RESET", "WS+", "AI+" 
@@ -166,7 +127,6 @@ Esp32Listener::Buffer Esp32Listener::write_serial(const char *command, const cha
 
             Buffer rx_buffer = read_serial(START_MARKER, END_MARKER);
 
-            // WARNING: this if check won't work with my custom START_MARKER and END_MARKER
             if (starts_with(rx_buffer.data, OK_FLAG)) {
                 Serial.println(F(OK_FLAG));
 
@@ -187,7 +147,7 @@ Esp32Listener::Buffer Esp32Listener::write_serial(const char *command, const cha
 
 // WARNING: need to double check that this works properly
 // NOTE: I might not need this since I have START_MARKER and END_MARKER
-const Esp32Listener::Buffer Esp32Listener::left_strip(const Buffer rx_buffer, const uint8_t to_index) {
+Esp32Listener::Buffer& Esp32Listener::left_strip(Buffer& rx_buffer, uint8_t to_index) {
     memmove(rx_buffer.data, rx_buffer.data + to_index, rx_buffer.length - to_index);
     return rx_buffer;
 }
