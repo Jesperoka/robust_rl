@@ -13,6 +13,8 @@ from pprint import pprint
 
 SCENE = "./mujoco_models/scene.xml"
 COMPILATION_CACHE_DIR = "./compiled_functions"
+OUTPUT_DIR = "demos/assets/"
+OUTPUT_FILE = "temp.mp4"
 
 # jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR)
 
@@ -36,8 +38,6 @@ if __name__ == "__main__":
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
 
-    # pprint(dir(mj.MjvCamera))
-    # input("\n. . .\n")
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)
 
@@ -60,8 +60,11 @@ if __name__ == "__main__":
                                joint_angles).compile()
     print("done compiling. . .")
 
-    cam = mj.MjvCamera()
-
+    # Works fine
+    cam = mujoco.MjvCamera()
+    cam.elevation = -90
+    cam.azimuth = 90 
+    cam.lookat = jax.numpy.array([0, 0, 0])
 
     frames = []
     fps = 30.0
@@ -69,7 +72,6 @@ if __name__ == "__main__":
 
     while mjx_data.time <= duration:
         print(mjx_data.time)
-
         v = jnp.array([jax.lax.sin(mjx_data.time)])
         theta = jnp.array([jax.lax.sin(2 * mjx_data.time)])
         omega = jnp.array([0.2])
@@ -81,23 +83,4 @@ if __name__ == "__main__":
             frames.append(renderer.render())
 
     renderer.close()
-    # TODO: submit issue with camera in minimal xml and using mj.MjvCamera
-    mediapy.write_video("vids/vid.mp4", frames, fps=fps)
-    # mediapy.show_video(frames, fps=fps)
-
-    # Valid kwargs to mediapy.write_video
-    # -----------------------------------
-      # path: _Path,
-      # shape: tuple[int, int],
-      # *,
-      # codec: str = 'h264',
-      # metadata: VideoMetadata | None = None,
-      # fps: float | None = None,
-      # bps: int | None = None,
-      # qp: int | None = None,
-      # crf: float | None = None,
-      # ffmpeg_args: str | Sequence[str] = '',
-      # input_format: str = 'rgb',
-      # dtype: _DTypeLike = np.uint8,
-      # encoded_format: str | None = None,
-    # -----------------------------------
+    mediapy.write_video(OUTPUT_DIR+OUTPUT_FILE, frames, fps=fps)

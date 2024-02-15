@@ -12,8 +12,8 @@ matplotlib.use('TkAgg')
 from matplotlib import animation as ani
 from matplotlib import pyplot as plt
 
-SCENE = "./mujoco_models/scene.xml"
-COMPILATION_CACHE_DIR = "./compiled_functions"
+SCENE = "mujoco_models/scene.xml"
+COMPILATION_CACHE_DIR = "compiled_functions"
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR)
 

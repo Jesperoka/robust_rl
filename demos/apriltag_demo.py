@@ -1,6 +1,5 @@
 import numpy as np
 import cv2
-from cv2.typing import Point
 from pupil_apriltags import Detector, Detection
 from mediapy import write_video
 
@@ -18,7 +17,8 @@ K = np.float32([[FX, 0, CX],
                 [0, FY, CY],
                 [0, 0, 1]])
 
-VIDEO_PATH: str = "apriltag_demo_2.mp4"
+INPUT_VIDEO_PATH: str = "demos/assets/apriltag_lab_demo.mp4"
+OUTPUT_VIDEO_PATH: str = "demos/assets/apriltag_demo_output.mp4"
 
 
 class IterableVideoCapture(cv2.VideoCapture):
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         decode_sharpening=0.25,
     )
 
-    capture: IterableVideoCapture = IterableVideoCapture(VIDEO_PATH)
+    capture: IterableVideoCapture = IterableVideoCapture(INPUT_VIDEO_PATH)
 
     frames = []
     R = np.eye(3)
@@ -67,4 +67,4 @@ if __name__ == "__main__":
         frame = draw_axis(frame, R, t, K)
         frames.append(frame)
 
-    write_video("apriltag_demo_output.mp4", frames, fps=30)
+    write_video(OUTPUT_VIDEO_PATH, frames, fps=30)

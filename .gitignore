@@ -1,3 +1,10 @@
+### USER ADDED ###
+*.pt
+runs/
+
+
+### FROM TEMPLATE BELOW ###
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
