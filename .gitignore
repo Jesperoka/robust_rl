@@ -1,5 +1,7 @@
 ### USER ADDED ###
 *.pt
+*.onnx
+*.torchscript
 runs/
 
 
