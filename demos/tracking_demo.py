@@ -17,133 +17,80 @@ VIDEO = "demos/assets/airplane_hack.mp4"
 CLASSES = yaml_load(check_yaml("DOTAv1.5.yaml"))["names"]
 colors = np.random.uniform(0, 255, size=(len(CLASSES), 3))
 
-def draw_bounding_box(img, class_id, confidence, x, y, x_plus_w, y_plus_h):
-    label = f"{CLASSES[class_id]} ({confidence:.2f})"
-    color = colors[class_id]
-    cv2.rectangle(img, (x, y), (x_plus_w, y_plus_h), color, 2)
-    cv2.putText(img, label, (x - 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-def detect(onnx_model, input_image):
-    model: cv2.dnn.Net = cv2.dnn.readNetFromONNX(onnx_model)
-    original_image: np.ndarray = cv2.imread(input_image)
-    [height, width, _] = original_image.shape
-    length = max((height, width))
-    image = np.zeros((length, length, 3), np.uint8)
-    image[0:height, 0:width] = original_image
-    scale = length / 640
-    blob = cv2.dnn.blobFromImage(image, scalefactor=1 / 255, size=(640, 640), swapRB=True)
-    model.setInput(blob)
+def draw_rotated_bounding_box(img, box_info):
+    color = (0, 255, 0)
+    vertices = box_info["box"].points().astype(int)
+    cv2.line(img, vertices[0], vertices[1], color, 2)
+    cv2.line(img, vertices[1], vertices[2], color, 2)
+    cv2.line(img, vertices[2], vertices[3], color, 2)
+    cv2.line(img, vertices[3], vertices[0], color, 2)
+    label = f"{box_info['class_id']} ({box_info['score']:.2f})"
+    text_pos = tuple(vertices[1] - np.array([0, 10]))
+    cv2.putText(img, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    outputs = model.forward()
-    print(outputs.shape)
+def detect_rotated(model_output, scale, original_image):
+    score_threshold = 0.25
+    nms_threshold = 0.45
+    nms_threshold_decay = 0.5
 
-    outputs = np.array([cv2.transpose(outputs[0])])
-    rows = outputs.shape[1]
+    print(model_output.shape)
+    data = np.array([model_output[0]])[0]
+    rows, cols = data.shape
+    print(data.shape)
+
+    x_factor = scale
+    y_factor = scale 
+
     boxes = []
+    BOXES = []
     scores = []
-    class_ids = []
 
-    for i in range(rows):
-        classes_scores = outputs[0][i][4:]
-        (minScore, maxScore, minClassLoc, (x, maxClassIndex)) = cv2.minMaxLoc(classes_scores)
-        if maxScore >= 0.25:
-            box = [
-                outputs[0][i][0] - (0.5 * outputs[0][i][2]),
-                outputs[0][i][1] - (0.5 * outputs[0][i][3]),
-                outputs[0][i][2],
-                outputs[0][i][3],
-            ]
+    for i in range(cols):
+        class_scores = data[4:-1, i]                # first 4 are bounding box coordinates, last one is angle
+        max_class_score = np.max(class_scores)
+        class_id = np.argmax(class_scores)
+        
+        if max_class_score > score_threshold: 
+            scores.append(max_class_score)
+            x = data[0, i] * x_factor
+            y = data[1, i] * y_factor
+            w = data[2, i] * x_factor
+            h = data[3, i] * y_factor
+            angle = data[-1, i]
+
+            if angle >= np.pi and angle <= 0.75 * np.pi:
+                angle = angle - np.pi
+
+            box = cv2.RotatedRect((x, y), (w, h), angle * 180 / np.pi)
+            box_info = {
+                "class_id": class_id,
+                "score": max_class_score,
+                "box": box, 
+            }
             boxes.append(box)
-            scores.append(maxScore)
-            class_ids.append(maxClassIndex)
+            BOXES.append(box_info)
 
-    result_boxes = cv2.dnn.NMSBoxes(boxes, scores, 0.25, 0.45, 0.5)
-    detections = []
 
-    for i in range(len(result_boxes)):
-        index = result_boxes[i]
-        box = boxes[index]
-        detection = {
-            "class_id": class_ids[index],
-            "class_name": CLASSES[class_ids[index]],
-            "confidence": scores[index],
-            "box": box,
-            "scale": scale,
-        }
-        detections.append(detection)
-        draw_bounding_box(
-            original_image,
-            class_ids[index],
-            scores[index],
-            round(box[0] * scale),
-            round(box[1] * scale),
-            round((box[0] + box[2]) * scale),
-            round((box[1] + box[3]) * scale),
-        )
+    indices = cv2.dnn.NMSBoxesRotated(boxes, scores, score_threshold, nms_threshold, nms_threshold_decay)
+
+    print(len(boxes))
+    print(len(indices))
+
+    for i in indices:
+        remaining_boxes = BOXES[i]
+        draw_rotated_bounding_box(original_image, BOXES[i])
 
     cv2.imshow("image", original_image)
     print("Press 0 to exit.")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-    return detections
+    return remaining_boxes 
 
-def detect_2(model_output, scale, original_image):
-    outputs = np.array([cv2.transpose(model_output[0])])
-    rows = outputs.shape[1]
-    boxes = []
-    scores = []
-    class_ids = []
-
-    for i in range(rows):
-        classes_scores = outputs[0][i][4:]
-        (minScore, maxScore, minClassLoc, (x, maxClassIndex)) = cv2.minMaxLoc(classes_scores)
-        if maxScore >= 0.25:
-            box = [
-                outputs[0][i][0] - (0.5 * outputs[0][i][2]),
-                outputs[0][i][1] - (0.5 * outputs[0][i][3]),
-                outputs[0][i][2],
-                outputs[0][i][3],
-            ]
-            boxes.append(box)
-            scores.append(maxScore)
-            class_ids.append(maxClassIndex)
-
-    result_boxes = cv2.dnn.NMSBoxes(boxes, scores, 0.7, 0.1, 0.1)
-    detections = []
-
-    for i in range(len(result_boxes)):
-        index = result_boxes[i]
-        box = boxes[index]
-        detection = {
-            "class_id": class_ids[index],
-            "class_name": CLASSES[class_ids[index]],
-            "confidence": scores[index],
-            "box": box,
-            "scale": scale,
-        }
-        detections.append(detection)
-        draw_bounding_box(
-            original_image,
-            class_ids[index],
-            scores[index],
-            round(box[0] * scale),
-            round(box[1] * scale),
-            round((box[0] + box[2]) * scale),
-            round((box[1] + box[3]) * scale),
-        )
-
-    cv2.imshow("image", original_image)
-    print("Press 0 to exit.")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    return detections
 
 if __name__ == '__main__':
-    _model = YOLO('yolov8x-obb.pt', task="obb") 
-    torch.jit.save(torch.jit.script(_model), 'yolov8x-obb.torchscript_2')
-    input()
+    # _model = YOLO('yolov8x-obb.pt', task="obb") 
     # _model.export(format="onnx", imgsz=640, simplify=True, half=True, opset=12)
 
     # model = torch.jit.load('yolov8x-obb.torchscript')
@@ -171,5 +118,5 @@ if __name__ == '__main__':
     # pprint(results[0].shape)
 
     # detections = detect("yolov8x-obb.onnx", "demos/assets/airplane_aerial_view.png")
-    detections = detect_2(results[0], scale, img)
+    detections = detect_rotated(results[0], scale, img)
 
