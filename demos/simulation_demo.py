@@ -12,10 +12,12 @@ matplotlib.use('TkAgg')
 from matplotlib import animation as ani
 from matplotlib import pyplot as plt
 
+from pprint import pprint
+
 SCENE = "mujoco_models/scene.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
-jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR)
+jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR) # type: ignore[attr-defined]
 
 
 # @jax.jit
@@ -34,18 +36,18 @@ def step(mjx_model: mjx.Model, mjx_data: mjx.Data, v: jnp.ndarray, theta: jnp.nd
 
 # TODO: vmap and parallelize environment as done in the brax tutorial colab
 if __name__ == "__main__":
-    model = mj.MjModel.from_xml_path(SCENE)
-    data = mj.MjData(model)
-    mj.mj_resetData(model, data)
+    model = mj.MjModel.from_xml_path(SCENE) # type: ignore[attr-defined]
+    data = mj.MjData(model)                 # type: ignore[attr-defined]
+    mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
 
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)
 
     print("\n\nINFO:\njax.local_devices():", jax.local_devices(), " jax.local_device_count():",
-          jax.local_device_count(), " _xla.is_optimized_build(): ", jax.lib.xla_client._xla.is_optimized_build(),
-          " jax.default_backend():", jax.default_backend(), " compilation_cache.is_initialized():",
-          jax.experimental.compilation_cache.compilation_cache.is_initialized(), "\n")
+          jax.local_device_count(), " _xla.is_optimized_build(): ", jax.lib.xla_client._xla.is_optimized_build(),   # type: ignore[attr-defined]
+          " jax.default_backend():", jax.default_backend(), " compilation_cache.is_initialized():",                 # type: ignore[attr-defined]
+          jax.experimental.compilation_cache.compilation_cache.is_initialized(), "\n")                              # type: ignore[attr-defined]     
 
     jax.print_environment_info()
 
