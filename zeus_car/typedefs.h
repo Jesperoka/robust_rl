@@ -9,9 +9,9 @@ enum class Mode : uint8_t {
 };
 
 typedef struct {
-    float angle;
-    float velocity;
-    float rot_vel;
+    float angle;    // rad
+    float velocity; // m/s
+    float rot_vel;  // rad/s
 } Action;
 
 typedef struct {

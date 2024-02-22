@@ -5,6 +5,8 @@
 #include "car_control.h"
 
 // https://research.ijcaonline.org/volume113/number3/pxc3901586.pdf
+// TODO: measure accurately 
+// WARNING: make sure to maintain same measurements in physical.py
 constexpr float R_INV = 1.0/0.03;   // reciprocal of wheel radius
 constexpr float L_X = 0.11/2;       // half length of front-back distance (between wheel centers)
 constexpr float L_Y = 0.16/2;       // half length of left-right distance (between wheel centers)
@@ -69,13 +71,10 @@ void stop_motors() {
 
 // https://research.ijcaonline.org/volume113/number3/pxc3901586.pdf
 WheelSpeeds mecanum_inverse_kinematics(const Action& action) {
-    const float v = action.velocity;
-    const float cos_phi = cos(action.angle*DEG_TO_RAD);  
-    const float sin_phi = sin(action.angle*DEG_TO_RAD);
     const float omega_z = action.rot_vel;
 
-    const float v_x = action.velocity * cos(action.angle*DEG_TO_RAD);
-    const float v_y = action.velocity * sin(action.angle*DEG_TO_RAD);
+    const float v_x = action.velocity * cos(action.angle);
+    const float v_y = action.velocity * sin(action.angle);
     const float sum = v_x + v_y;
     const float diff = v_x - v_y;
     
