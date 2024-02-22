@@ -29,6 +29,7 @@ def draw_rotated_bounding_box(img, box_info):
     text_pos = tuple(vertices[1] - np.array([0, 10]))
     cv2.putText(img, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
+
 def detect_rotated(model_output, scale, original_image):
     score_threshold = 0.25
     nms_threshold = 0.45
@@ -74,11 +75,9 @@ def detect_rotated(model_output, scale, original_image):
 
     indices = cv2.dnn.NMSBoxesRotated(boxes, scores, score_threshold, nms_threshold, nms_threshold_decay)
 
-    print(len(boxes))
-    print(len(indices))
-
+    remaining_boxes = []
     for i in indices:
-        remaining_boxes = BOXES[i]
+        remaining_boxes.append(BOXES[i])
         draw_rotated_bounding_box(original_image, BOXES[i])
 
     cv2.imshow("image", original_image)
