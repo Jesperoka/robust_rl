@@ -40,6 +40,7 @@ if __name__ == "__main__":
     data = mj.MjData(model)                 # type: ignore[attr-defined]
     mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
+    viewer = mujoco.viewer.launch(model, data)
 
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)
