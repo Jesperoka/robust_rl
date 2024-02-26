@@ -104,11 +104,11 @@
                         <geom mesh="finger_0" material="off_white" class="visual"/>
                         <geom mesh="finger_1" material="black" class="visual"/>
                         <!-- <geom mesh="finger_0" class="collision"/> -->
-                        <geom class="fingertip_pad_collision_1"/>
-                        <geom class="fingertip_pad_collision_2"/>
-                        <geom class="fingertip_pad_collision_3"/>
-                        <geom class="fingertip_pad_collision_4"/>
-                        <geom class="fingertip_pad_collision_5"/>
+                        <geom name="left_fingerpad_1" class="fingertip_pad_collision_1"/>
+                        <geom name="left_fingerpad_2" class="fingertip_pad_collision_2"/>
+                        <geom name="left_fingerpad_3" class="fingertip_pad_collision_3"/>
+                        <geom name="left_fingerpad_4" class="fingertip_pad_collision_4"/>
+                        <geom name="left_fingerpad_5" class="fingertip_pad_collision_5"/>
                       </body>
                       <body name="right_finger" pos="0 0 0.0584" quat="0 0 0 1">
                         <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
@@ -116,11 +116,11 @@
                         <geom mesh="finger_0" material="off_white" class="visual"/>
                         <geom mesh="finger_1" material="black" class="visual"/>
                         <!-- <geom mesh="finger_0" class="collision"/> -->
-                        <geom class="fingertip_pad_collision_1"/>
-                        <geom class="fingertip_pad_collision_2"/>
-                        <geom class="fingertip_pad_collision_3"/>
-                        <geom class="fingertip_pad_collision_4"/>
-                        <geom class="fingertip_pad_collision_5"/>
+                        <geom name="right_fingerpad_1" class="fingertip_pad_collision_1"/>
+                        <geom name="right_fingerpad_2" class="fingertip_pad_collision_2"/>
+                        <geom name="right_fingerpad_3" class="fingertip_pad_collision_3"/>
+                        <geom name="right_fingerpad_4" class="fingertip_pad_collision_4"/>
+                        <geom name="right_fingerpad_5" class="fingertip_pad_collision_5"/>
                       </body>
                       <site class="panda" name="grip_site" pos="0 0 0.102" size="0.035" rgba="0.3 0.1 0.1 0.3"/>
                     </body>

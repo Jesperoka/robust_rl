@@ -1,15 +1,41 @@
-<!-- test -->
 <mujoco model="scene">
     <compiler angle="radian" meshdir="meshes" autolimits="true" />
     <option integrator="Euler" solver="Newton" timestep="0.002" iterations="3" ls_iterations="6"
-        tolerance="1e-8" noslip_iterations="12">
+        tolerance="1e-8" noslip_iterations="12" impratio="1.5">
         <flag eulerdamp="disable" contact="enable" passive="disable" frictionloss="disable"
             equality="disable" />
     </option>
 
     <default>
         <geom contype="0" conaffinity="0" />
+        <default class="soft_contact_parameters">
+            <pair solimp="0.0 1.0 0.007 0.75 10" solref="0.02 1" friction="15 12.5 12.5" />
+        </default>
     </default>
+
+    <contact>
+        <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_1"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_2"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_3"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_4"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_5"
+            class="soft_contact_parameters" />
+
+        <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_1"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_2"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_3"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_4"
+            class="soft_contact_parameters" />
+        <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_5"
+            class="soft_contact_parameters" />
+    </contact>
 
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
@@ -32,7 +58,8 @@
         <material name="aluminum" emission="0.5" specular="0.2" shininess="0.7" reflectance="0.2"
             rgba="0.6 0.6 0.6 1" />
         <material name="black_plastic" rgba="0.2 0.2 0.2 1" reflectance="0.3" specular="0.3" />
-        <material name="ball_material" texture="red_checker" texuniform="true" texrepeat="10 10" />
+        <material name="ball_material" texture="red_checker" texuniform="true" texrepeat="10 10"
+            rgba="1 1 1 0.2" />
 
         <texture name="zeus_car_texture" file="meshes/zeus_car_meshes/3DModel_LowPoly.png" type="2d" />
         <material name="zeus_car_material" texture="zeus_car_texture" />
@@ -80,11 +107,12 @@
 
         </body>
 
-
         <body name="ball" pos="-0.15 -0.50 1.3"> <!-- NOTE: BALL DEFINED LAST -->
             <joint name="ball_com" type="free" />
-            <geom type="sphere" size="0.035" material="ball_material" density="0.1"
-                friction="2 1 1" conaffinity="1" />
+            <geom name="ball_soft_contact_layer" type="sphere" size="0.035" material="ball_material"
+                density="0.01" conaffinity="1" />
+            <geom type="sphere" size="0.017" rgba="0.3 0.1 0.1 1" density="0.01"
+                conaffinity="1" />
         </body>
 
         <body name="table" pos="-0.15 -0.50 0">
@@ -98,11 +126,13 @@
     <keyframe>
         <key name="pick_up_2"
             qpos='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.0335 0.0335 -0.15 -0.50 1.24 1 0 0 0'
-            ctrl='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.025 0.0 0.025 0.0' />
+            ctrl='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.020 0.0 0.020 0.0' />
     </keyframe>
 
     <!-- Actuators -->
     <actuator>
+
+        <!-- Car actuators -->
         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
             joint="car_slider_x" name="car_vel_x" />
         <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
@@ -110,6 +140,7 @@
         <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8"
             joint="car_hinge" name="car_ang_vel" />
 
+        <!-- Joint actuators -->
         <general class="panda" name="joint_0" joint="joint_0" gainprm="4500" biasprm="0 -4500 -450" />
         <general
             class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450"
@@ -130,24 +161,20 @@
             gainprm="2000" biasprm="0 -2000 -200"
             forcerange="-12 12" />
 
-        <!-- Custom definition of the finger actuators without using tendon -->
+        <!-- Gripper actuator -->
         <position class="panda" name="left_finger_position" joint="finger_joint_1"
-            forcerange="-10 10" kp="100"
+            forcerange="-100 100" kp="100"
             ctrlrange="0 0.04" />
         <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1"
             forcerange="-35 35" kv="100"
             ctrlrange="-0.05 0.05" />
         <position class="panda" name="right_finger_position" joint="finger_joint_2"
-            forcerange="-10 10" kp="100"
+            forcerange="-100 100" kp="100"
             ctrlrange="0 0.04" />
         <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2"
             forcerange="-35 35" kv="100"
             ctrlrange="-0.05 0.05" />
 
-        <!-- <adhesion class="panda" name="left_finger_adhesion" body="left_finger" gain="1"
-        ctrlrange="0 0.1"/> -->
-        <!-- <adhesion class="panda" name="right_finger_adhesion" body="right_finger" gain="1"
-        ctrlrange="0 0.1"/> -->
     </actuator>
 
 </mujoco>
