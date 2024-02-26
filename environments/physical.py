@@ -19,7 +19,7 @@ class PandaLimits:
     p_dddot_max:    float = 6500.0  # m/s^3
 
     # Joint Space limits
-    q_min: Array = field(default_factory=lambda:array([          # rad
+    q_min: Array = field(default_factory=lambda:array([         # rad
         -2.8973, 
         -1.7628, 
         -2.8973, 
@@ -29,7 +29,7 @@ class PandaLimits:
         -2.8973
     ], dtype=float))
 
-    q_max: Array = field(default_factory=lambda:array([          # rad   
+    q_max: Array = field(default_factory=lambda:array([         # rad   
         2.8973,
         1.7628,
         2.8973,
@@ -39,7 +39,7 @@ class PandaLimits:
         2.8973
     ], dtype=float))
 
-    q_dot_min: Array = field(default_factory=lambda:array([      # rad/s
+    q_dot_min: Array = field(default_factory=lambda:array([     # rad/s
         -2.1750,
         -2.1750,
         -2.1750,
@@ -49,7 +49,7 @@ class PandaLimits:
         -2.6100
     ], dtype=float))
 
-    q_dot_max: Array = field(default_factory=lambda:array([      # rad/s 
+    q_dot_max: Array = field(default_factory=lambda:array([     # rad/s 
         2.1750,
         2.1750,
         2.1750,
@@ -59,7 +59,7 @@ class PandaLimits:
         2.6100
     ], dtype=float))
 
-    q_ddot_min: Array = field(default_factory=lambda:array([     # rad/s^2
+    q_ddot_min: Array = field(default_factory=lambda:array([    # rad/s^2
         -15.0,
         -7.5,
         -10.0,
@@ -69,7 +69,7 @@ class PandaLimits:
         -20.0
     ], dtype=float))
 
-    q_ddot_max: Array = field(default_factory=lambda:array([     # rad/s^2
+    q_ddot_max: Array = field(default_factory=lambda:array([    # rad/s^2
         15.0,
         7.5,
         10.0,
@@ -79,7 +79,7 @@ class PandaLimits:
         20.0
     ], dtype=float))
 
-    tau_min: Array = field(default_factory=lambda:array([        # Nm
+    tau_min: Array = field(default_factory=lambda:array([       # Nm
         -87.0,
         -87.0,
         -87.0,
@@ -89,7 +89,7 @@ class PandaLimits:
         -12.0
     ], dtype=float))
 
-    tau_max: Array = field(default_factory=lambda:array([        # Nm
+    tau_max: Array = field(default_factory=lambda:array([       # Nm
         87.0,
         87.0,
         87.0,
@@ -99,7 +99,7 @@ class PandaLimits:
         12.0
     ], dtype=float))
 
-    tau_dot_max: Array = field(default_factory=lambda:array([    # Nm/s
+    tau_dot_max: Array = field(default_factory=lambda:array([   # Nm/s
         1000.0,
         1000.0,
         1000.0,
@@ -107,6 +107,28 @@ class PandaLimits:
         1000.0,
         1000.0,
         1000.0
+    ], dtype=float))
+
+@dataclass(frozen=True)
+class HandLimits:
+    q_min: Array = field(default_factory=lambda:array([         # m
+        0.0,
+        0.0
+    ], dtype=float))
+
+    q_max: Array = field(default_factory=lambda:array([         # m
+        0.4,
+        0.4
+    ], dtype=float))
+
+    q_dot_min: Array = field(default_factory=lambda:array([     # m/s
+        -0.05,
+        -0.05
+    ], dtype=float))
+
+    q_dot_max: Array = field(default_factory=lambda:array([     # m/s
+        0.05,
+        0.05
     ], dtype=float))
 
 # TODO: measure accurately

@@ -11,7 +11,7 @@ from brax.io import mjcf
 from brax.training.agents import ppo
 
 from environments.options import EnvironmentOptions 
-from environments.physical import PlayingArea, ZeusLimits, PandaLimits
+from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
 
 from pprint import pprint
 
@@ -46,20 +46,27 @@ class A_to_B(PipelineEnv):
         self.goal_radius: float = 0.1
 
         self.nq_car: int = 3
-        self.nq_arm: int = 7 + 2
-        assert self.nq_car + self.nq_arm == self.system.nq, f"self.nq_car + self.nq_arm = {self.nq_car + self.nq_arm} should match self.system.nq = {self.system.nq}." 
+        self.nq_arm: int = 7
+        self.nq_gripper: int = 2
+        self.nq_ball: int = 7
+        assert self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball == self.system.nq, f"self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball = {self.nq_car} + {self.nq_arm} + {self.nq_gripper} + {self.nq_ball} should match self.system.nq = {self.system.nq}." 
 
         self.nu_car: int = 3
-        self.nu_arm: int = 7 + 2
-        assert self.nu_car + self.nu_arm == self.system.nu, f"self.nu_car + self.nu_arm = {self.nu_car + self.nu_arm} should match self.system.nu = {self.system.nu}."
+        self.nu_arm: int = 7
+        self.nu_gripper: int = 4
+        assert self.nu_car + self.nu_arm + self.nu_gripper == self.system.nu, f"self.nu_car + self.nu_arm + self.nu_gripper = {self.nu_car} + {self.nu_arm} + {self.nu_gripper} should match self.system.nu = {self.system.nu}."
 
         self.car_limits: ZeusLimits = ZeusLimits()
-        assert self.car_limits.q_min.shape[0] == self.nq_arm, f"self.car_limits.q_min.shape[0] = {self.car_limits.q_min.shape[0]} should match self.nq_arm = {self.nq_arm}."
-        assert self.car_limits.q_max.shape[0] == self.nq_arm, f"self.car_limits.q_max.shape[0] = {self.car_limits.q_max.shape[0]} should match self.nq_arm = {self.nq_arm}."
+        assert self.car_limits.q_min.shape[0] == self.nq_car, f"self.car_limits.q_min.shape[0] = {self.car_limits.q_min.shape[0]} should match self.nq_car = {self.nq_car}."
+        assert self.car_limits.q_max.shape[0] == self.nq_car, f"self.car_limits.q_max.shape[0] = {self.car_limits.q_max.shape[0]} should match self.nq_car = {self.nq_car}."
 
         self.arm_limits: PandaLimits = PandaLimits()
         assert self.arm_limits.q_min.shape[0] == self.nq_arm, f"self.arm_limits.q_min.shape[0] = {self.arm_limits.q_min.shape[0]} should match self.nq_arm = {self.nq_arm}."
         assert self.arm_limits.q_max.shape[0] == self.nq_arm, f"self.arm_limits.q_max.shape[0] = {self.arm_limits.q_max.shape[0]} should match self.nq_arm = {self.nq_arm}."
+
+        self.gripper_limits: HandLimits = HandLimits()
+        assert self.gripper_limits.q_min.shape[0] == self.nq_gripper, f"self.gripper_limits.q_min.shape[0] = {self.gripper_limits.q_min.shape[0]} should match self.nq_gripper = {self.nq_gripper}."
+        assert self.gripper_limits.q_max.shape[0] == self.nq_gripper, f"self.gripper_limits.q_max.shape[0] = {self.gripper_limits.q_max.shape[0]} should match self.nq_gripper = {self.nq_gripper}."
 
         self.playing_area: PlayingArea = PlayingArea()
         assert self.car_limits.x_max <= self.playing_area.x_center + self.playing_area.half_x_length, f"self.car_limits.x_max = {self.car_limits.x_max} should be less than or equal to self.playing_area.x_center + self.playing_area.half_x_length = {self.playing_area.x_center + self.playing_area.half_x_length}."
@@ -72,10 +79,12 @@ class A_to_B(PipelineEnv):
 
     @override
     def reset(self, rng: jax.Array) -> State:
-        rng, rng_car, rng_arm, rng_goal = jax.random.split(rng, 3)
+        rng_car: jax.Array; rng_arm: jax.Array; rng_goal: jax.Array
+
+        rng, rng_car, rng_arm, rng_goal = jax.random.split(rng, 4)
         q_car, qvel_car = self.reset_car(rng_car)
         q_arm, qvel_arm = self.reset_arm(rng_arm)
-        p_goal: jax.Array = self.reset_goal(rng_goal)
+        p_goal = self.reset_goal(rng_goal)
 
         pipline_state: PipelineState = self.pipeline_init(
                 jnp.concatenate([q_car, q_arm], axis=0),
@@ -91,7 +100,7 @@ class A_to_B(PipelineEnv):
 
         return State(
                 pipeline_state=pipline_state,
-                obs=self.observe(pipline_state),
+                obs=self.observe(pipline_state, p_goal),
                 reward=jnp.array(0),
                 done=jnp.array(0),
                 metrics=metrics
@@ -139,8 +148,9 @@ class A_to_B(PipelineEnv):
         # -> (q_car, q_arm, qd_car, qd_arm, p_goal)
         
     def reset_arm(self, rng_arm: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return self.sys.qpos0 + jax.random.uniform(
+        return jax.random.uniform(
                 rng_arm,
+                shape=(self.nq_arm,),
                 minval=self.arm_limits.q_min,
                 maxval=self.arm_limits.q_max
                 ), jnp.zeros(self.nq_arm)
@@ -148,6 +158,7 @@ class A_to_B(PipelineEnv):
     def reset_car(self, rng_car: jax.Array) -> tuple[jax.Array, jax.Array]:
         return jax.random.uniform(
                 rng_car, 
+                shape=(self.nq_car,),
                 minval=self.car_limits.q_min,
                 maxval=self.car_limits.q_max
                 ), jnp.zeros(self.nq_car)
@@ -155,6 +166,7 @@ class A_to_B(PipelineEnv):
     def reset_goal(self, rng_goal: jax.Array) -> jax.Array:
         return jax.random.uniform(
                 rng_goal,
+                shape=(2,),
                 minval=jnp.array([self.car_limits.x_min, self.car_limits.y_min]),
                 maxval=jnp.array([self.car_limits.x_max, self.car_limits.y_max])
                 )
@@ -178,6 +190,13 @@ if __name__ == "__main__":
 
     OUTPUT_DIR = "demos/assets/"
     OUTPUT_FILE = "A_to_B_rollout_demo.mp4"
+
+    print("\n\nINFO:\njax.local_devices():", jax.local_devices(), " jax.local_device_count():",
+          jax.local_device_count(), " _xla.is_optimized_build(): ", jax.lib.xla_client._xla.is_optimized_build(),   # type: ignore[attr-defined]
+          " jax.default_backend():", jax.default_backend(), " compilation_cache.is_initialized():",                 # type: ignore[attr-defined]
+          jax.experimental.compilation_cache.compilation_cache.is_initialized(), "\n")                              # type: ignore[attr-defined]     
+
+    jax.print_environment_info()
 
     # decode_observation must be first argument, even if unused.
     def reward_function(

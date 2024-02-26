@@ -11,7 +11,7 @@
         <body name="target" pos="0 0 0.13">
 
             <!-- <geom name="calibration_box" pos="0 0 0" type="box" size="0.055 0.08 0.01" rgba="0.655 0.820 0.212 0.500"/> -->
-            <geom name="target_top" pos="0 0 0" type="box" size="0.09 0.09 0.0025"  material="aluminum"/>
+            <geom name="target_top" pos="0 0 0" type="box" size="0.09 0.09 0.0025"  material="aluminum" contype="1"/>
             <geom name="target_left" pos="0 0.055 -0.053" type="box" size="0.015 0.0025 0.0555" material="aluminum"/>
             <geom name="target_right" pos="0 -0.055 -0.053" type="box" size="0.015 0.0025 0.0555" material="aluminum"/>
 
