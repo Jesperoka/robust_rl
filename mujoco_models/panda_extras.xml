@@ -112,13 +112,6 @@
         <mesh file="simplified_panda_meshes/finger_1.obj" />
     </asset>
 
-    <!-- <tendon> -->
-    <!--   <fixed name="split"> -->
-    <!--     <joint joint="finger_joint1" coef="0.5"/> -->
-    <!--     <joint joint="finger_joint2" coef="0.5"/> -->
-    <!--   </fixed> -->
-    <!-- </tendon> -->
-
     <equality>
         <joint joint1="finger_joint1" joint2="finger_joint2" solimp="0.95 0.99 0.001"
             solref="0.005 1" />
@@ -146,10 +139,17 @@
             forcerange="-12 12" />
 
         <!-- Custom definition of the finger actuators without using tendon -->
-        <velocity class="panda" name="actuator8" joint="finger_joint1" forcerange="-100 100"
+        <position class="panda" name="left_finger_position" joint="finger_joint1" forcerange="-5 5" kp="1"
+            ctrlrange="0 0.04" /> <!-- actrange="-0.05 0.05"/> -->
+        <velocity class="panda" name="left_finger_velocity" joint="finger_joint1" forcerange="-35 35" kv="100"
             ctrlrange="-0.05 0.05" /> <!-- actrange="-0.05 0.05"/> -->
-        <velocity class="panda" name="actuator9" joint="finger_joint2" forcerange="-100 100"
+        <position class="panda" name="right_finger_position" joint="finger_joint2" forcerange="-5 5" kp="1"
+            ctrlrange="0 0.04" /> <!-- actrange="-0.05 0.05"/> -->
+        <velocity class="panda" name="right_finger_velocity" joint="finger_joint2" forcerange="-35 35" kv="100"
             ctrlrange="-0.05 0.05" /> <!-- actrange="-0.05 0.05"/> -->
+
+        <adhesion class="panda" name="left_finger_adhesion" body="left_finger" gain="1" ctrlrange="0 0.1"/>
+        <adhesion class="panda" name="right_finger_adhesion" body="right_finger" gain="1" ctrlrange="0 0.1"/>
 
     </actuator>
 
