@@ -2,15 +2,16 @@ import jax
 import mujoco
 # import pdb
 
-from typing import Callable, Literal, override 
+from typing import Callable, Literal, Sequence, override 
 from functools import partial
 from jax import numpy as jnp
-from mujoco import MjModel 
+from mujoco import MjModel # type: ignore[attr-defined]
 from brax.base import State as PipelineState, System
 from brax.envs.base import PipelineEnv, State
 from brax.envs import register_environment
 from brax.io import mjcf 
 from brax.training.agents import ppo
+from numpy import ndarray
 
 from environments.options import EnvironmentOptions 
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
@@ -45,7 +46,7 @@ class A_to_B(PipelineEnv):
         assert jnp.allclose(self.dt, options.control_time), f"self.dt = {self.dt} should match control_time = {options.control_time}."
 
         self.goal_radius: float = 0.1
-        self.grip_site_id: int = mujoco.mj_name2id(self.system.mj_model, mujoco.mjtObj.mjOBJ_SITE.value, "grip_site")
+        self.grip_site_id: int = mujoco.mj_name2id(self.system.mj_model, mujoco.mjtObj.mjOBJ_SITE.value, "grip_site") # type: ignore[attr-defined]
 
         self.num_free_joints: int = 1
         assert self.system.nq - self.num_free_joints == self.system.nv, f"self.system.nq - self.num_free_joints = {self.system.nq} - {self.num_free_joints} should match self.system.nv = {self.system.nv}. 3D angular velocities form a 3D vector space (tangent space of the quaternions)."
@@ -55,6 +56,12 @@ class A_to_B(PipelineEnv):
         self.nq_gripper: int = 2
         self.nq_ball: int = 7
         assert self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball == self.system.nq, f"self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball = {self.nq_car} + {self.nq_arm} + {self.nq_gripper} + {self.nq_ball} should match self.system.nq = {self.system.nq}." 
+
+        self.nv_car: int = 3
+        self.nv_arm: int = 7
+        self.nv_gripper: int = 2
+        self.nv_ball: int = 6 # self.nq_ball - 1
+        assert self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball == self.system.nv, f"self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball = {self.nv_car} + {self.nv_arm} + {self.nv_gripper} + {self.nv_ball} should match self.system.nv = {self.system.nv}."
 
         self.nu_car: int = 3
         self.nu_arm: int = 7
@@ -90,17 +97,13 @@ class A_to_B(PipelineEnv):
         q_car, qd_car = self.reset_car(rng_car)
         q_arm, qd_arm = self.reset_arm(rng_arm)
         q_gripper, qd_gripper = self.reset_gripper(rng_gripper)
-        print(q_car.shape, qd_car.shape)
-        print(q_arm.shape, qd_arm.shape)
-        print(q_gripper.shape, qd_gripper.shape)
     
         dummy_state: PipelineState = self.pipeline_init(
             jnp.concatenate([q_car, q_arm, q_gripper, 10*jnp.ones((self.nq_ball, ))], axis=0),
             jnp.concatenate([qd_car, qd_arm, qd_gripper, jnp.zeros((self.nq_ball - 1, ))], axis=0)
                 )
 
-        grip_site: jax.Array = dummy_state.site_xpos[self.grip_site_id]
-        print(grip_site.shape)
+        grip_site: jax.Array = dummy_state.site_xpos[self.grip_site_id] # type: ignore[attr-defined]
         q_ball, qd_ball = self.reset_ball(rng_ball, grip_site)
         p_goal = self.reset_goal(rng_goal)
 
@@ -129,7 +132,7 @@ class A_to_B(PipelineEnv):
     def step(self, state: State, action: jax.Array) -> State:
         pipeline_state: PipelineState = self.pipeline_step(state.pipeline_state, action)
         observation: jax.Array = self.observe(pipeline_state, state.metrics["p_goal"])
-        q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_ball, p_goal = self.decode_observation(observation)
+        q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = self.decode_observation(observation)
 
         car_outside_limits: jax.Array = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)
         arm_outside_limits: jax.Array = self.outside_limits(q_arm, self.arm_limits.q_min, self.arm_limits.q_max)
@@ -141,7 +144,7 @@ class A_to_B(PipelineEnv):
         state.metrics["reward_arm"] = jnp.array(0)
         state.metrics["time"] += self.dt
 
-        return state.replace(
+        return state.replace( # type: ignore[attr-defined]
                 pipeline_state=pipeline_state,
                 obs=self.observe(pipeline_state, state.metrics["p_goal"]),
                 reward=reward,
@@ -156,18 +159,20 @@ class A_to_B(PipelineEnv):
             p_goal
             ], axis=0)
 
-    def decode_observation(self, observation: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    def decode_observation(self, observation: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         return (
                 observation[0 : self.nq_car], 
                 observation[self.nq_car : self.nq_car + self.nq_arm],
                 observation[self.nq_car + self.nq_arm : self.nq_car + self.nq_arm + self.nq_gripper],
                 observation[self.nq_car + self.nq_arm + self.nq_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball : 2*self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball],
-                observation[2*self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball : 2*self.nq_car + 2*self.nq_arm + self.nq_gripper + self.nq_ball],
-                observation[2*self.nq_car + 2*self.nq_arm + self.nq_gripper + self.nq_ball : 2*self.nq_car + 2*self.nq_arm + 2*self.nq_gripper + self.nq_ball],
-                observation[2*self.nq_car + 2*self.nq_arm + 2*self.nq_gripper + self.nq_ball : ]
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball : ]
                 )
-        # -> (q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_ball, p_goal)
+        # -> (q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal)
+        #[cq, cq, cq, aq, aq, aq, aq, aq, aq, aq, gq, gq, bq, bq, bq, bq, bq, bq, bq, cdq, cdq, cdq, adq, adq, adq, adq, adq, adq, adq, gdq, gdq, bdq, bdq, bdq, bdq, bdq, bdq, px, py]
         
     def reset_car(self, rng_car: jax.Array) -> tuple[jax.Array, jax.Array]:
         return jax.random.uniform(
@@ -215,11 +220,14 @@ class A_to_B(PipelineEnv):
                 )
 
     def outside_limits(self, arr: jax.Array, minval: jax.Array, maxval: jax.Array) -> jax.Array:
-        return jnp.where(arr <= minval, ).any() or jnp.where(arr >= maxval).any()
+        return jnp.logical_or(jnp.any(jnp.less_equal(arr, minval), axis=0), jnp.any(jnp.greater_equal(arr, maxval), axis=0))
 
     def goal_reached(self, q_car: jax.Array, p_goal: jax.Array) -> jax.Array:
-        return jnp.linalg.norm(q_car[:2] - p_goal) < self.goal_radius
+        return jnp.any(jnp.less_equal(jnp.linalg.norm(q_car[:2] - p_goal), self.goal_radius))
 
+    @override
+    def render(self, trajectory: list[PipelineState], camera: mujoco.MjvCamera) -> Sequence[ndarray]: # type: ignore[override]
+        return super().render(trajectory, camera=camera)
 
 
 register_environment('A_to_B', A_to_B)
@@ -243,11 +251,11 @@ if __name__ == "__main__":
 
     # decode_observation must be first argument, even if unused.
     def reward_function(
-            decode_observation: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]],
+            decode_observation: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]],
             observation: jax.Array, 
             action: jax.Array
             ) -> jax.Array:
-        q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_ball, p_goal = decode_observation(observation)
+        q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = decode_observation(observation)
         return -jnp.linalg.norm(q_car[:2] - p_goal)
 
     environment_options = EnvironmentOptions(
@@ -256,6 +264,12 @@ if __name__ == "__main__":
             )
 
     mj_model = MjModel.from_xml_path("mujoco_models/scene.xml")
+
+    cam = mujoco.MjvCamera() # type: ignore[attr-defined]
+    cam.elevation = -90
+    cam.azimuth = 90 
+    cam.lookat = jax.numpy.array([0, 0, 0])
+    cam.distance = 4
 
     kwargs = {
             "mj_model": mj_model,
@@ -269,14 +283,17 @@ if __name__ == "__main__":
     jit_reset = jax.jit(env.reset)
     jit_step = jax.jit(env.step)
 
-    state = jit_reset(jax.random.PRNGKey(0))
+    rng = jax.random.PRNGKey(0)
+    rng, subrng = jax.random.split(rng)
+    state = jit_reset(subrng)
     rollout = [state.pipeline_state]
 
     for _ in range(100):
         ctrl = 0.1*jnp.ones(env.action_size)
-        state = jit_step(state, ctrl)
+        rng, subrng = jax.random.split(rng)
+        state = jit_reset(subrng)
         rollout.append(state.pipeline_state) 
 
-    write_video(OUTPUT_DIR+OUTPUT_FILE, rollout, fps=20)
+    write_video(OUTPUT_DIR+OUTPUT_FILE, env.render(rollout, cam), fps=20)
 
 
