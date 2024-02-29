@@ -122,7 +122,7 @@
                         <geom name="right_fingerpad_4" class="fingertip_pad_collision_4"/>
                         <geom name="right_fingerpad_5" class="fingertip_pad_collision_5"/>
                       </body>
-                      <site class="panda" name="grip_site" pos="0 0 0.102" size="0.035" rgba="0.3 0.1 0.1 0.3"/>
+                      <site class="panda" name="grip_site" pos="0 0 0.102" size="0.031" rgba="0.1 0.3 0.1 0.3"/>
                     </body>
                   </body>
                 </body>

@@ -1,0 +1,267 @@
+<mujoco model="scene">
+    <compiler angle="radian" meshdir="meshes" autolimits="true" />
+    <option integrator="Euler" solver="Newton" timestep="0.002" iterations="3" ls_iterations="6"
+        tolerance="1e-8" noslip_iterations="12" impratio="1.5">
+        <flag eulerdamp="disable" contact="enable" passive="disable" frictionloss="disable"
+            equality="disable" />
+    </option>
+
+    <default>
+        <geom contype="0" conaffinity="0" />
+        <default class="soft_contact_parameters">
+            <pair solimp="0.0 1.0 0.007 0.75 10" solref="0.02 1" friction="15 12.5 12.5" />
+        </default>
+        <default class="collides_with_ball">
+            <geom contype="1"/>
+        </default>
+    </default>
+
+    <!-- <contact> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_1" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_2" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_3" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_4" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="left_fingerpad_5" -->
+    <!--         class="soft_contact_parameters" /> -->
+
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_1" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_2" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_3" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_4" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!--     <pair geom1="ball_soft_contact_layer" geom2="right_fingerpad_5" -->
+    <!--         class="soft_contact_parameters" /> -->
+    <!-- </contact> -->
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global offwidth="3840" offheight="2160" />
+        <quality offsamples="8" />
+    </visual>
+
+    <asset>
+        <texture name="red_checker" type="cube" builtin="checker" rgb1="0.5 0.1 0.1"
+            rgb2="0.3 0.1 0.1" markrgb="0.8 0.8 0.8" width="100" height="100" />
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture name="groundplane_texture" type="2d" builtin="checker" mark="edge"
+            rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane_texture" texuniform="false"
+            texrepeat="1 1"
+            reflectance="0.2" />
+        <material name="matte_aluminum" rgba="0.75 0.75 0.75 1" reflectance="0.4" specular="0.3" />
+        <material name="aluminum" emission="0.5" specular="0.2" shininess="0.7" reflectance="0.2"
+            rgba="0.6 0.6 0.6 1" />
+        <material name="black_plastic" rgba="0.2 0.2 0.2 1" reflectance="0.3" specular="0.3" />
+        <material name="ball_material" texture="red_checker" texuniform="true" texrepeat="10 10"
+            rgba="1 1 1 0.2" />
+
+        <texture name="zeus_car_texture" file="meshes/zeus_car_meshes/3DModel_LowPoly.png" type="2d" />
+        <material name="zeus_car_material" texture="zeus_car_texture" />
+        <mesh name="zeus_car_mesh" file="zeus_car_meshes/_3DModel_LowPoly.obj"
+            scale="0.0645 0.0645 0.0645" />
+        <material name="glass" rgba="0.7 0.7 0.9 0.2" reflectance="0.5" specular="0.4"/>
+    </asset>
+
+    <include file="panda_extras.xml" />
+
+    <!-- Scene -->
+    <worldbody>
+
+        <light pos="0 0 2.5" dir="0 0 -1" directional="true" />
+        <body name="ground" pos="0 0 0">
+            <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane"
+                friction="0.001" />
+        </body>
+
+        <body name="driving_surface" pos="1.1 0 0.0">
+            <body name="driving_surface_top" pos="0 0 0.1">
+                <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
+                <geom pos="0 0 0" size="1 1 0.01" type="box" material="black_plastic" />
+            </body>
+            <geom pos="0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="-0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="-0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+        </body>
+
+        <body name="robot_stand" pos="0 0 0">
+            <geom name="stand_cylinder_top" pos="-0.043 0 0.905" size="0.115 0.005" type="cylinder"
+                material="matte_aluminum" />
+            <geom name="stand_cylinder_middle" pos="-0.043 0 0.455" size="0.07 0.445"
+                type="cylinder" material="matte_aluminum" />
+            <geom name="stand_cylinder_bottom" pos="-0.043 0 0.005" size="0.31 0.005"
+                type="cylinder" material="matte_aluminum" />
+
+            <body name="stand_top" pos="0 0 0.905">
+                <include file="panda_body.xml" /> <!-- NOTE: PANDA DEFINED SECOND -->
+            </body>
+
+        </body>
+
+
+        <body name="ball_feeder" pos="-0.50 -1.00 1.3">
+            <body name="gutter_0" pos="0 0 0" xyaxes="0.0 0.984808 -0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" name="gutter_plank_left" size="0.50 0.0211 0.005" pos="0 0 0.0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" name="gutter_plank_right" size="0.50 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" name="gutter_plank_end" size="0.005 0.0211 0.0211" pos="0.495 0.0 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" name="gutter_plank_other_end" size="0.01 0.0341 0.0341" pos="-0.465 0 -0.0161" xyaxes="-1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="gutter_1" pos="0 0 0.15" xyaxes="0.0 0.984808 0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" size="0.405 0.0211 0.005" pos="0 0 0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" size="0.405 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" size="0.01 0.0341 0.0341" pos="0.365 0 -0.0161" xyaxes="1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="gutter_2" pos="0 -0.10 0.30" xyaxes="0.0 0.984808 -0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" size="0.405 0.0211 0.005" pos="0 0 0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" size="0.405 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" size="0.01 0.0341 0.0341" pos="-0.364 0 -0.0161" xyaxes="-1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="gutter_3" pos="0 0 0.45" xyaxes="0.0 0.984808 0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" size="0.405 0.0211 0.005" pos="0 0 0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" size="0.405 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" size="0.01 0.0341 0.0341" pos="0.365 0 -0.0161" xyaxes="1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="gutter_4" pos="0 -0.10 0.60" xyaxes="0.0 0.984808 -0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" size="0.405 0.0211 0.005" pos="0 0 0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" size="0.405 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" size="0.01 0.0341 0.0341" pos="-0.365 0 -0.0161" xyaxes="-1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="gutter_5" pos="0 0 0.75" xyaxes="0.0 0.984808 0.043619 0.5 0.0 0.5">
+                <geom class="collides_with_ball" size="0.405 0.0211 0.005" pos="0 0 0" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <geom class="collides_with_ball" size="0.405 0.005 0.0211" pos="0 -0.0161 -0.0161" xyaxes="1 0 0 0 1 0" type="box" material="black_plastic"/>
+                <!-- <geom class="collides_with_ball" size="0.01 0.0341 0.0341" pos="0.365 0 -0.0161" xyaxes="1 -0.5 0.5 0 1 0" type="box" material="black_plastic" /> -->
+            </body>
+            <body name="glass_wall_front">
+                <geom class="collides_with_ball" size="0.01 0.45 0.45" pos="0.0365 -0.05 0.45" type="box" material="glass" />
+            </body>
+            <body  name="glass_wall_back">
+                <geom class="collides_with_ball" size="0.01 0.45 0.45" pos="-0.0565 -0.05 0.45" type="box" material="glass" />
+            </body>
+            <body  name="glass_wall_left">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.45" pos="-0.01 -0.49 0.45" type="box" material="glass" />
+            </body>
+            <body  name="glass_wall_right">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.40" pos="-0.01 0.39 0.50" type="box" material="glass" />
+            </body>
+            <body pos="0 0 0.60">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.48 0.10" xyaxes="1 0 0 0 1 0.2" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.040" type="box" pos="-0.01 -0.465 0.06" xyaxes="1 0 0 0 1 0.8" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.46 0.05" xyaxes="1 0 0 0 0.7 1" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.42 0.03" xyaxes="1 0 0 0 0.2 1" material="black_plastic" />
+            </body>
+            <body pos="-0.022 -0.10 0.45" xyaxes="-1 0 0 0 -1 0">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.48 0.10" xyaxes="1 0 0 0 1 0.2" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.040" type="box" pos="-0.01 -0.465 0.06" xyaxes="1 0 0 0 1 0.8" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.46 0.05" xyaxes="1 0 0 0 0.7 1" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.42 0.03" xyaxes="1 0 0 0 0.2 1" material="black_plastic" />
+            </body>
+            <body pos="0 0 0.30">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.48 0.10" xyaxes="1 0 0 0 1 0.2" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.040" type="box" pos="-0.01 -0.465 0.06" xyaxes="1 0 0 0 1 0.8" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.46 0.05" xyaxes="1 0 0 0 0.7 1" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.42 0.03" xyaxes="1 0 0 0 0.2 1" material="black_plastic" />
+            </body>
+            <body pos="-0.022 -0.10 0.15" xyaxes="-1 0 0 0 -1 0">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.48 0.10" xyaxes="1 0 0 0 1 0.2" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.040" type="box" pos="-0.01 -0.465 0.06" xyaxes="1 0 0 0 1 0.8" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.46 0.05" xyaxes="1 0 0 0 0.7 1" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.42 0.03" xyaxes="1 0 0 0 0.2 1" material="black_plastic" />
+            </body>
+            <body pos="0 0 0">
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.48 0.10" xyaxes="1 0 0 0 1 0.2" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.040" type="box" pos="-0.01 -0.465 0.06" xyaxes="1 0 0 0 1 0.8" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.46 0.05" xyaxes="1 0 0 0 0.7 1" material="black_plastic" />
+                <geom class="collides_with_ball" size="0.0365 0.01 0.045" type="box" pos="-0.01 -0.42 0.03" xyaxes="1 0 0 0 0.2 1" material="black_plastic" />
+            </body>
+        </body>
+
+        <body pos="-0.50 -0.650 2.12"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -0.713 2.12"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -0.776 2.12"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -0.839 2.11"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -0.902 2.11"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+
+        <body pos="-0.50 -0.965 2.11"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.028 2.10"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.091 2.10"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.154 2.10"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.217 2.09"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+
+        <body pos="-0.50 -1.280 2.09"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.343 2.09"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.406 2.08"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.406 1.97"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.343 1.97"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+
+        <body pos="-0.50 -1.217 1.97"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.154 1.96"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.091 1.96"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -1.028 1.96"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+        <body pos="-0.50 -0.965 1.95"> <joint type="free" /> <geom type="sphere" size="0.031" material="ball_material" density="16" conaffinity="1" contype="1"/> <geom type="sphere" size="0.0155" rgba="0.3 0.1 0.1 1" density="16" conaffinity="1" /> </body>
+
+    </worldbody>
+
+    <!-- <keyframe> -->
+    <!--     <key name="pick_up_2" -->
+    <!--         qpos='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.0335 0.0335 -0.15 -0.50 1.24 1 0 0 0' -->
+    <!--         ctrl='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.020 0.0 0.020 0.0' /> -->
+    <!-- </keyframe> -->
+
+    <!-- Actuators -->
+    <actuator>
+
+        <!-- Car actuators -->
+        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
+            joint="car_slider_x" name="car_vel_x" />
+        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
+            joint="car_slider_y" name="car_vel_y" />
+        <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8"
+            joint="car_hinge" name="car_ang_vel" />
+
+        <!-- Joint actuators -->
+        <general class="panda" name="joint_0" joint="joint_0" gainprm="4500" biasprm="0 -4500 -450" />
+        <general
+            class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450"
+            ctrlrange="-1.7628 1.7628" />
+        <general class="panda" name="joint_2" joint="joint_2"
+            gainprm="3500" biasprm="0 -3500 -350" />
+        <general class="panda" name="joint_3"
+            joint="joint_3" gainprm="3500" biasprm="0 -3500 -350"
+            ctrlrange="-3.0718 -0.0698" />
+        <general class="panda" name="joint_4" joint="joint_4"
+            gainprm="2000" biasprm="0 -2000 -200"
+            forcerange="-12 12" />
+        <general class="panda" name="joint_5" joint="joint_5"
+            gainprm="2000" biasprm="0 -2000 -200"
+            forcerange="-12 12"
+            ctrlrange="-0.0175 3.7525" />
+        <general class="panda" name="joint_6" joint="joint_6"
+            gainprm="2000" biasprm="0 -2000 -200"
+            forcerange="-12 12" />
+
+        <!-- Gripper actuator -->
+        <position class="panda" name="left_finger_position" joint="finger_joint_1"
+            forcerange="-100 100" kp="100"
+            ctrlrange="0 0.04" />
+        <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1"
+            forcerange="-35 35" kv="100"
+            ctrlrange="-0.05 0.05" />
+        <position class="panda" name="right_finger_position" joint="finger_joint_2"
+            forcerange="-100 100" kp="100"
+            ctrlrange="0 0.04" />
+        <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2"
+            forcerange="-35 35" kv="100"
+            ctrlrange="-0.05 0.05" />
+
+    </actuator>
+
+</mujoco>

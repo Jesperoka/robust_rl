@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 
 from pprint import pprint
 
-SCENE = "mujoco_models/scene.xml"
+SCENE = "mujoco_models/scene_with_balls_rack.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR) # type: ignore[attr-defined]
@@ -41,6 +41,7 @@ if __name__ == "__main__":
     mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
     viewer = mujoco.viewer.launch(model, data)
+    exit()
 
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)
