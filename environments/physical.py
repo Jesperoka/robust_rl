@@ -143,18 +143,21 @@ class ZeusDimensions:
 @dataclass(frozen=True)
 class ZeusLimits:
     # Orientation
-    theta_min:      float = 0.0     # rad
-    theta_max:      float = 2*pi    # rad
-    theta_dot_min:  float = -1.0    # rad/s
-    theta_dot_max:  float = 1.0     # rad/s
+    theta_min:  float = 0.0     # rad
+    theta_max:  float = 2*pi    # rad
+    omega_min:  float = -1.0    # rad/s
+    omega_max:  float = 1.0     # rad/s
 
-    # Position
+    # Position 
     x_max:  float = PlayingArea.x_center + PlayingArea.half_x_length - ZeusDimensions.l_diag # m
     x_min:  float = PlayingArea.x_center - PlayingArea.half_x_length + ZeusDimensions.l_diag # m
     y_max:  float = PlayingArea.y_center + PlayingArea.half_y_length - ZeusDimensions.l_diag # m
     y_min:  float = PlayingArea.y_center - PlayingArea.half_y_length + ZeusDimensions.l_diag # m
 
     # Generalized
-    q_min:  Array = field(default_factory=lambda:array([ZeusLimits.x_min, ZeusLimits.y_min, ZeusLimits.theta_min], dtype=float)) # m, m, rad
-    q_max:  Array = field(default_factory=lambda:array([ZeusLimits.x_max, ZeusLimits.y_max, ZeusLimits.theta_max], dtype=float)) # m, m, rad
+    q_min:      Array = field(default_factory=lambda:array([ZeusLimits.x_min, ZeusLimits.y_min, ZeusLimits.theta_min], dtype=float)) # m, m, rad
+    q_max:      Array = field(default_factory=lambda:array([ZeusLimits.x_max, ZeusLimits.y_max, ZeusLimits.theta_max], dtype=float)) # m, m, rad
 
+    # Actuation
+    a_min:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_min, ZeusLimits.omega_min], dtype=float))
+    a_max:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))

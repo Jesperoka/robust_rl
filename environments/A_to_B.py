@@ -1,6 +1,6 @@
 import jax
 import mujoco
-# import pdb
+import pdb
 
 from typing import Callable, Literal, Sequence, override 
 from functools import partial
@@ -10,7 +10,6 @@ from brax.base import State as PipelineState, System
 from brax.envs.base import PipelineEnv, State
 from brax.envs import register_environment
 from brax.io import mjcf 
-from brax.training.agents import ppo
 from numpy import ndarray
 
 from environments.options import EnvironmentOptions 
@@ -87,10 +86,13 @@ class A_to_B(PipelineEnv):
         assert self.car_limits.y_min >= self.playing_area.y_center - self.playing_area.half_y_length, f"self.car_limits.y_min = {self.car_limits.y_min} should be greater than or equal to self.playing_area.y_center - self.playing_area.half_y_length = {self.playing_area.y_center - self.playing_area.half_y_length}."
 
         self.reward_function: Callable[[jax.Array, jax.Array], jax.Array] = partial(options.reward_function, self.decode_observation)
+        self.car_controller: Callable[[jax.Array], jax.Array] = options.car_controller 
+        self.arm_controller: Callable[[jax.Array], jax.Array] = options.arm_controller
 
 
     @override
     def reset(self, rng: jax.Array) -> State:
+        # just type declarations
         rng_car: jax.Array; rng_arm: jax.Array; rng_gripper: jax.Array; rng_ball: jax.Array; rng_goal: jax.Array
     
         rng, rng_car, rng_arm, rng_gripper, rng_ball, rng_goal = jax.random.split(rng, 6)
@@ -113,44 +115,77 @@ class A_to_B(PipelineEnv):
                 )
 
         metrics: dict[str, jax.Array] = {
-                "grip_site": grip_site,
-                "p_goal": p_goal,
-                "reward_car": jnp.array(0),
-                "reward_arm": jnp.array(0),
-                "time": jnp.array(0),
+                "x_goal": p_goal[0],
+                "y_goal": p_goal[1],
+                "reward_car": jnp.array(0.0, dtype=float),
+                "reward_arm": jnp.array(0.0, dtype=float),
+                "time": jnp.array(0.0, dtype=float),
                 }
+
+        info: dict[str, jax.Array] = {"truncation": jnp.array(0.0, dtype=float)}
 
         return State(
                 pipeline_state=pipeline_state,
                 obs=self.observe(pipeline_state, p_goal),
-                reward=jnp.array(0),
-                done=jnp.array(0),
-                metrics=metrics
+                reward=jnp.array(0.0),
+                done=jnp.array(False),
+                metrics=metrics,
+                info=info
                 )
 
     @override
     def step(self, state: State, action: jax.Array) -> State:
-        pipeline_state: PipelineState = self.pipeline_step(state.pipeline_state, action)
-        observation: jax.Array = self.observe(pipeline_state, state.metrics["p_goal"])
+        # just type declarations
+        q_car: jax.Array; q_arm: jax.Array; q_gripper: jax.Array; q_ball: jax.Array; qd_car: jax.Array; 
+        qd_arm: jax.Array; qd_gripper: jax.Array; qd_ball: jax.Array; p_goal: jax.Array
+
+        ctrl_car: jax.Array = self.car_local_polar_to_global_cartesian(state.pipeline_state.q[2], self.car_controller(action[:self.nu_car])) # type: ignore[attr-defined]
+        ctrl_car = jnp.clip(ctrl_car, self.car_limits.a_min, self.car_limits.a_max)
+
+        ctrl_arm: jax.Array = self.arm_controller(action[self.nu_car : self.nu_car + self.nu_arm])
+        ctrl_arm = jnp.clip(ctrl_arm, self.arm_limits.tau_min, self.arm_limits.tau_max)
+
+        ctrl_gripper: jax.Array = jax.lax.cond(action[self.nu_car + self.nu_arm] > 0.5, self.grip, self.release)
+
+        ctrl: jax.Array = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)
+
+        pipeline_state: PipelineState = self.pipeline_step(state.pipeline_state, ctrl)
+
+        p_goal: jax.Array = jnp.array([state.metrics["x_goal"], state.metrics["y_goal"]], dtype=float)
+        observation: jax.Array = self.observe(pipeline_state, p_goal)
         q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = self.decode_observation(observation)
 
-        car_outside_limits: jax.Array = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)
-        arm_outside_limits: jax.Array = self.outside_limits(q_arm, self.arm_limits.q_min, self.arm_limits.q_max)
-        car_goal_reached: jax.Array = self.goal_reached(q_car, p_goal)
+        car_outside_limits: jax.Array = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)            # car pos
+        arm_outside_limits: jax.Array = self.outside_limits(qd_arm, self.arm_limits.q_dot_min, self.arm_limits.q_dot_max)   # arm vel
 
-        reward: jax.Array = self.reward_function(observation, action)
+        car_goal_reached: jax.Array = self.car_goal_reached(q_car, p_goal)
+        arm_goal_reached: jax.Array = self.arm_goal_reached(q_car, q_ball)
 
-        state.metrics["reward_car"] = reward
-        state.metrics["reward_arm"] = jnp.array(0)
-        state.metrics["time"] += self.dt
+        reward: jax.Array = self.reward_function(observation, action) - 100.0*(car_outside_limits + arm_outside_limits)
+
+        state.metrics.update(
+                reward_car = reward,
+                reward_arm = reward,
+                time = state.metrics["time"] + self.dt
+                )
 
         return state.replace( # type: ignore[attr-defined]
                 pipeline_state=pipeline_state,
-                obs=self.observe(pipeline_state, state.metrics["p_goal"]),
+                obs=self.observe(pipeline_state, p_goal),
                 reward=reward,
-                done=jnp.array(0),
-                metrics=state.metrics
+                done=jnp.logical_or(car_goal_reached, arm_goal_reached),
+                metrics=state.metrics,
+                info=state.info
                 )
+
+    @override
+    def render(self, trajectory: list[PipelineState], camera: mujoco.MjvCamera) -> Sequence[ndarray]: # type: ignore[override]
+        return super().render(trajectory, camera=camera)
+
+    @property
+    @override
+    def action_size(self) -> int:
+        return self.nu_car + self.nu_arm + 1
 
     def observe(self, pipeline_state: PipelineState, p_goal: jax.Array) -> jax.Array:
         return jnp.concatenate([
@@ -200,7 +235,6 @@ class A_to_B(PipelineEnv):
                 )
             ]), jnp.zeros((self.nq_gripper, ))
 
-
     def reset_ball(self, rng_ball: jax.Array, grip_site: jax.Array) -> tuple[jax.Array, jax.Array]:
         return jnp.concatenate([
             grip_site + jax.random.uniform(
@@ -216,18 +250,38 @@ class A_to_B(PipelineEnv):
                 rng_goal,
                 shape=(2,),
                 minval=jnp.array([self.car_limits.x_min, self.car_limits.y_min]),
-                maxval=jnp.array([self.car_limits.x_max, self.car_limits.y_max])
+                maxval=jnp.array([self.car_limits.x_max, self.car_limits.y_max]),
                 )
 
     def outside_limits(self, arr: jax.Array, minval: jax.Array, maxval: jax.Array) -> jax.Array:
         return jnp.logical_or(jnp.any(jnp.less_equal(arr, minval), axis=0), jnp.any(jnp.greater_equal(arr, maxval), axis=0))
 
-    def goal_reached(self, q_car: jax.Array, p_goal: jax.Array) -> jax.Array:
+    def car_goal_reached(self, q_car: jax.Array, p_goal: jax.Array) -> jax.Array:
         return jnp.any(jnp.less_equal(jnp.linalg.norm(q_car[:2] - p_goal), self.goal_radius))
 
-    @override
-    def render(self, trajectory: list[PipelineState], camera: mujoco.MjvCamera) -> Sequence[ndarray]: # type: ignore[override]
-        return super().render(trajectory, camera=camera)
+    def arm_goal_reached(self, q_car: jax.Array, q_ball: jax.Array) -> jax.Array: # WARNING: hardcoded height
+        return jnp.any(jnp.less_equal(jnp.linalg.norm(jnp.array([q_car[0], q_car[1], 0.1]) - q_ball[:3]), self.goal_radius))
+
+    def grip(self) -> jax.Array: 
+        return jnp.array([0.02, -0.025, 0.02, -0.025])
+    
+    def release(self) -> jax.Array: 
+        return jnp.array([0.04, 0.05, 0.04, 0.05])
+
+    # transforms local polar car action to global cartesian action 
+    def car_local_polar_to_global_cartesian(self, car_angle: jax.Array, action: jax.Array) -> jax.Array:
+        v: jax.Array = self.car_velocity_modifier(action[1])*action[0]
+        vx: jax.Array = v*jnp.cos(action[1])
+        vy: jax.Array = v*jnp.sin(action[1])
+        omega: jax.Array = action[2]
+        return jnp.array([vx*jnp.cos(car_angle) + vy*jnp.sin(car_angle), 
+                          -vx*jnp.sin(car_angle) + vy*jnp.cos(car_angle), 
+                          omega])
+
+    # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
+    def car_velocity_modifier(self, theta: jax.Array) -> jax.Array:
+        PI_OVER_2, PI_OVER_4 = jnp.pi / 2.0, jnp.pi / 4.0
+        return 0.5 + 0.5*(jnp.abs((theta % PI_OVER_2) - PI_OVER_4) / PI_OVER_4)
 
 
 register_environment('A_to_B', A_to_B)
@@ -235,8 +289,12 @@ register_environment('A_to_B', A_to_B)
 
 # Example usage:
 if __name__ == "__main__":
+    from datetime import datetime 
     from mediapy import write_video
     from brax.envs import get_environment
+    from brax.io import model
+    from matplotlib import pyplot as plt
+    from brax.training.agents.ppo import train as ppo 
 
 
     OUTPUT_DIR = "demos/assets/"
@@ -256,7 +314,9 @@ if __name__ == "__main__":
             action: jax.Array
             ) -> jax.Array:
         q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = decode_observation(observation)
-        return -jnp.linalg.norm(q_car[:2] - p_goal)
+        ball_distance: jax.Array = jnp.linalg.norm(jnp.array([q_car[0], q_car[1], 0.1]) - q_ball[:3])
+        car_distance: jax.Array = jnp.linalg.norm(q_car[:2] - p_goal) 
+        return -0.1*ball_distance - 0.1*car_distance
 
     environment_options = EnvironmentOptions(
             reward_function=reward_function,
@@ -266,9 +326,9 @@ if __name__ == "__main__":
     mj_model = MjModel.from_xml_path("mujoco_models/scene.xml")
 
     cam = mujoco.MjvCamera() # type: ignore[attr-defined]
-    cam.elevation = -90
-    cam.azimuth = 90 
-    cam.lookat = jax.numpy.array([0, 0, 0])
+    cam.elevation = -50
+    cam.azimuth = 50 
+    cam.lookat = jax.numpy.array([1.1, 0, 0])
     cam.distance = 4
 
     kwargs = {
@@ -288,12 +348,66 @@ if __name__ == "__main__":
     state = jit_reset(subrng)
     rollout = [state.pipeline_state]
 
-    for _ in range(100):
-        ctrl = 0.1*jnp.ones(env.action_size)
-        rng, subrng = jax.random.split(rng)
-        state = jit_reset(subrng)
-        rollout.append(state.pipeline_state) 
+    train_fn = partial(
+            ppo.train, 
+            num_timesteps=100_000, num_evals=5, reward_scaling=0.1,
+            episode_length=1000, normalize_observations=True, action_repeat=1,
+            unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
+            discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=2048,
+            batch_size=1024, seed=0
+            )
+
+    x_data = []
+    y_data = []
+    ydataerr = []
+    times = [datetime.now()]
+
+    max_y, min_y = 0, -13000
+    def progress(num_steps, metrics):
+        times.append(datetime.now())
+        x_data.append(num_steps)
+        y_data.append(metrics['eval/episode_reward'])
+        ydataerr.append(metrics['eval/episode_reward_std'])
+
+        plt.xlim([0, train_fn.keywords['num_timesteps'] * 1.25])
+        plt.ylim([min_y, max_y])
+
+        plt.xlabel('# environment steps')
+        plt.ylabel('reward per episode')
+        plt.title(f'y={y_data[-1]:.3f}')
+
+        plt.errorbar(
+          x_data, y_data, yerr=ydataerr)
+        plt.show()
+
+    # pdb.set_trace()
+    make_inference_fn, params, _= train_fn(environment=env, progress_fn=progress)
+
+    print(f'time to jit: {times[1] - times[0]}')
+    print(f'time to train: {times[-1] - times[1]}')
+
+    model_path = '/tmp/mjx_brax_policy'
+    model.save_params(model_path, params)
+
+    params = model.load_params(model_path)
+
+    inference_fn = make_inference_fn(params)
+    jit_inference_fn = jax.jit(inference_fn)
+
+    rng = jax.random.PRNGKey(0)
+    state = jit_reset(rng)
+    rollout = [state.pipeline_state]
+
+    n_steps = 500
+    render_every = 2
+
+    for i in range(n_steps):
+      act_rng, rng = jax.random.split(rng)
+      ctrl, _ = jit_inference_fn(state.obs, act_rng)
+      state = jit_step(state, ctrl)
+      rollout.append(state.pipeline_state)
+
+      if state.done:
+        break
 
     write_video(OUTPUT_DIR+OUTPUT_FILE, env.render(rollout, cam), fps=20)
-
-
