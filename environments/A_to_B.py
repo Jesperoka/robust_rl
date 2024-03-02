@@ -104,31 +104,48 @@ class A_to_B(PipelineEnv):
             jnp.concatenate([q_car, q_arm, q_gripper, 10*jnp.ones((self.nq_ball, ))], axis=0),
             jnp.concatenate([qd_car, qd_arm, qd_gripper, jnp.zeros((self.nq_ball - 1, ))], axis=0)
                 )
-
         grip_site: jax.Array = dummy_state.site_xpos[self.grip_site_id] # type: ignore[attr-defined]
         q_ball, qd_ball = self.reset_ball(rng_ball, grip_site)
-        p_goal = self.reset_goal(rng_goal)
+
 
         pipeline_state: PipelineState = self.pipeline_init(
                 jnp.concatenate([q_car, q_arm, q_gripper, q_ball], axis=0),
                 jnp.concatenate([qd_car, qd_arm, qd_gripper, qd_ball], axis=0)
                 )
 
+        p_goal: jax.Array = self.reset_goal(rng_goal)
+        observation: jax.Array = self.observe(pipeline_state, p_goal)
+
+        car_outside_limits: jax.Array = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)            # car pos
+        arm_outside_limits: jax.Array = self.outside_limits(qd_arm, self.arm_limits.q_dot_min, self.arm_limits.q_dot_max)   # arm vel
+        reward: jax.Array = self.reward_function(observation, jnp.zeros((self.action_size, ))) - 100.0*(car_outside_limits + arm_outside_limits)
+        
+        car_goal_reached: jax.Array = self.car_goal_reached(q_car, p_goal)
+        arm_goal_reached: jax.Array = self.arm_goal_reached(q_car, q_ball)
+        done: jax.Array = jnp.logical_or(car_goal_reached, arm_goal_reached)
+
         metrics: dict[str, jax.Array] = {
-                "x_goal": p_goal[0],
-                "y_goal": p_goal[1],
-                "reward_car": jnp.array(0.0, dtype=float),
-                "reward_arm": jnp.array(0.0, dtype=float),
+                "reward": reward,
+                "reward_car": jnp.array(0.0, dtype=float), # TODO: implement
+                "reward_arm": jnp.array(0.0, dtype=float), # TODO: implement
                 "time": jnp.array(0.0, dtype=float),
                 }
 
-        info: dict[str, jax.Array] = {"truncation": jnp.array(0.0, dtype=float)}
+        info: dict[str, jax.Array] = {
+                "p_goal": p_goal,
+                "truncation": jnp.empty((), dtype=jnp.int32),
+                "first_obs": observation,
+                "steps": jnp.array([0], dtype=int),
+                "first_pipeline_state": pipeline_state # type: ignore[assignment] 
+                }
+        assert info["truncation"].dtype == jnp.int32, f"state.info['truncation'].dtype = {info['truncation'].dtype} should be int32."
+        assert info["truncation"].shape == (), f"state.info['truncation'].shape = {info['truncation'].shape} should be ()."
 
         return State(
                 pipeline_state=pipeline_state,
-                obs=self.observe(pipeline_state, p_goal),
-                reward=jnp.array(0.0),
-                done=jnp.array(False),
+                obs=observation,
+                reward=reward,
+                done=done,
                 metrics=metrics,
                 info=info
                 )
@@ -151,8 +168,7 @@ class A_to_B(PipelineEnv):
 
         pipeline_state: PipelineState = self.pipeline_step(state.pipeline_state, ctrl)
 
-        p_goal: jax.Array = jnp.array([state.metrics["x_goal"], state.metrics["y_goal"]], dtype=float)
-        observation: jax.Array = self.observe(pipeline_state, p_goal)
+        observation: jax.Array = self.observe(pipeline_state, state.info["p_goal"])
         q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = self.decode_observation(observation)
 
         car_outside_limits: jax.Array = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)            # car pos
@@ -169,7 +185,12 @@ class A_to_B(PipelineEnv):
                 time = state.metrics["time"] + self.dt
                 )
 
-        return state.replace( # type: ignore[attr-defined]
+        pprint(state.info["truncation"].dtype)
+        pprint(state.info["truncation"].shape)
+
+        state.info["truncation"] = jnp.empty((), dtype=jnp.int32)
+    
+        state = state.replace( # type: ignore[attr-defined]
                 pipeline_state=pipeline_state,
                 obs=self.observe(pipeline_state, p_goal),
                 reward=reward,
@@ -177,6 +198,12 @@ class A_to_B(PipelineEnv):
                 metrics=state.metrics,
                 info=state.info
                 )
+        assert state.info["truncation"].dtype == jnp.int32, f"state.info['truncation'].dtype = {state.info['truncation'].dtype} should be int32."
+        assert state.info["truncation"].shape == (), f"state.info['truncation'].shape = {state.info['truncation'].shape} should be ()."
+
+        # TODO: make minimal implementation of reset and step, then figure out why lax.scan in PPO training is not working
+
+        return state
 
     @override
     def render(self, trajectory: list[PipelineState], camera: mujoco.MjvCamera) -> Sequence[ndarray]: # type: ignore[override]
@@ -335,7 +362,7 @@ if __name__ == "__main__":
             "mj_model": mj_model,
             "options": environment_options,
             "backend": "mjx",
-            "debug": True,
+            "debug": False,
             }
 
     env = get_environment("A_to_B", **kwargs)
@@ -350,7 +377,7 @@ if __name__ == "__main__":
 
     train_fn = partial(
             ppo.train, 
-            num_timesteps=100_000, num_evals=5, reward_scaling=0.1,
+            num_timesteps=30_000_000, num_evals=0, reward_scaling=0.1,
             episode_length=1000, normalize_observations=True, action_repeat=1,
             unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
             discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=2048,
