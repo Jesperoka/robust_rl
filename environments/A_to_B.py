@@ -1,8 +1,9 @@
 import jax
+from jax._src.dtypes import dtype
 import mujoco
 import pdb
 
-from typing import Callable, Literal, Sequence, override 
+from typing import Callable, Literal, Sequence, override, Any
 from functools import partial
 from jax import numpy as jnp
 from mujoco import MjModel # type: ignore[attr-defined]
@@ -122,24 +123,18 @@ class A_to_B(PipelineEnv):
         
         car_goal_reached: jax.Array = self.car_goal_reached(q_car, p_goal)
         arm_goal_reached: jax.Array = self.arm_goal_reached(q_car, q_ball)
-        done: jax.Array = jnp.logical_or(car_goal_reached, arm_goal_reached)
+        done: jax.Array = jnp.float32(jnp.logical_or(car_goal_reached, arm_goal_reached))
 
         metrics: dict[str, jax.Array] = {
-                "reward": reward,
-                "reward_car": jnp.array(0.0, dtype=float), # TODO: implement
-                "reward_arm": jnp.array(0.0, dtype=float), # TODO: implement
-                "time": jnp.array(0.0, dtype=float),
+                "reward": jnp.float32(reward),
+                "reward_car": jnp.float32(0.0), # TODO: implement
+                "reward_arm": jnp.float32(0.0), # TODO: implement
+                "time": jnp.float32(0.0),
                 }
 
-        info: dict[str, jax.Array] = {
-                "p_goal": p_goal,
-                "truncation": jnp.empty((), dtype=jnp.int32),
-                "first_obs": observation,
-                "steps": jnp.array([0], dtype=int),
-                "first_pipeline_state": pipeline_state # type: ignore[assignment] 
-                }
-        assert info["truncation"].dtype == jnp.int32, f"state.info['truncation'].dtype = {info['truncation'].dtype} should be int32."
-        assert info["truncation"].shape == (), f"state.info['truncation'].shape = {info['truncation'].shape} should be ()."
+        info: dict[str, Any] = {"p_goal": p_goal}
+
+        for field in [observation, reward, done]: assert field.dtype == jnp.float32, f"field: {field} had dtype {field.dtype}, should be {jnp.float32}."
 
         return State(
                 pipeline_state=pipeline_state,
@@ -155,14 +150,18 @@ class A_to_B(PipelineEnv):
         # just type declarations
         q_car: jax.Array; q_arm: jax.Array; q_gripper: jax.Array; q_ball: jax.Array; qd_car: jax.Array; 
         qd_arm: jax.Array; qd_gripper: jax.Array; qd_ball: jax.Array; p_goal: jax.Array
+        a_car: jax.Array; a_arm: jax.Array; a_gripper: jax.Array
 
-        ctrl_car: jax.Array = self.car_local_polar_to_global_cartesian(state.pipeline_state.q[2], self.car_controller(action[:self.nu_car])) # type: ignore[attr-defined]
-        ctrl_car = jnp.clip(ctrl_car, self.car_limits.a_min, self.car_limits.a_max)
+        a_car, a_arm, a_gripper = self.decode_action(action)
 
-        ctrl_arm: jax.Array = self.arm_controller(action[self.nu_car : self.nu_car + self.nu_arm])
-        ctrl_arm = jnp.clip(ctrl_arm, self.arm_limits.tau_min, self.arm_limits.tau_max)
+        car_orientation: jax.Array = state.pipeline_state.q[2] # type: ignore[attr-defined]
+        car_scaled_action = self.scale_action(a_car, self.car_limits.a_min, self.car_limits.a_max)
+        car_local_ctrl = self.car_controller(car_scaled_action)
+        ctrl_car: jax.Array = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl) 
 
-        ctrl_gripper: jax.Array = jax.lax.cond(action[self.nu_car + self.nu_arm] > 0.5, self.grip, self.release)
+        arm_scaled_action = self.scale_action(a_arm, self.arm_limits.tau_min, self.arm_limits.tau_max)
+        ctrl_arm: jax.Array = self.arm_controller(arm_scaled_action)
+        ctrl_gripper: jax.Array = jax.lax.cond(a_gripper[0] > 0.0, self.grip, self.release)
 
         ctrl: jax.Array = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)
 
@@ -178,32 +177,23 @@ class A_to_B(PipelineEnv):
         arm_goal_reached: jax.Array = self.arm_goal_reached(q_car, q_ball)
 
         reward: jax.Array = self.reward_function(observation, action) - 100.0*(car_outside_limits + arm_outside_limits)
+        done: jax.Array = jnp.float32(jnp.logical_or(car_goal_reached, arm_goal_reached))
 
         state.metrics.update(
-                reward_car = reward,
-                reward_arm = reward,
-                time = state.metrics["time"] + self.dt
+                reward = reward,
+                reward_car = jnp.float32(reward), # TODO: implement
+                reward_arm = jnp.float32(reward), # TODO: implement
+                time = state.metrics["time"] + self.dt,
                 )
 
-        pprint(state.info["truncation"].dtype)
-        pprint(state.info["truncation"].shape)
-
-        state.info["truncation"] = jnp.empty((), dtype=jnp.int32)
+        for field in [observation, reward, done]: assert field.dtype == jnp.float32, f"field: {field} had dtype {field.dtype}, should be {jnp.float32}."
     
-        state = state.replace( # type: ignore[attr-defined]
+        return state.replace( # type: ignore[attr-defined]
                 pipeline_state=pipeline_state,
-                obs=self.observe(pipeline_state, p_goal),
+                obs=observation,
                 reward=reward,
-                done=jnp.logical_or(car_goal_reached, arm_goal_reached),
-                metrics=state.metrics,
-                info=state.info
+                done=done,
                 )
-        assert state.info["truncation"].dtype == jnp.int32, f"state.info['truncation'].dtype = {state.info['truncation'].dtype} should be int32."
-        assert state.info["truncation"].shape == (), f"state.info['truncation'].shape = {state.info['truncation'].shape} should be ()."
-
-        # TODO: make minimal implementation of reset and step, then figure out why lax.scan in PPO training is not working
-
-        return state
 
     @override
     def render(self, trajectory: list[PipelineState], camera: mujoco.MjvCamera) -> Sequence[ndarray]: # type: ignore[override]
@@ -219,7 +209,7 @@ class A_to_B(PipelineEnv):
             pipeline_state.q,
             pipeline_state.qd,
             p_goal
-            ], axis=0)
+            ], axis=0, dtype=pipeline_state.q.dtype)
 
     def decode_observation(self, observation: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         return (
@@ -234,7 +224,17 @@ class A_to_B(PipelineEnv):
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball : ]
                 )
         # -> (q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal)
-        #[cq, cq, cq, aq, aq, aq, aq, aq, aq, aq, gq, gq, bq, bq, bq, bq, bq, bq, bq, cdq, cdq, cdq, adq, adq, adq, adq, adq, adq, adq, gdq, gdq, bdq, bdq, bdq, bdq, bdq, bdq, px, py]
+
+    def decode_action(self, action: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        return (
+                action[0 : self.nu_car],
+                action[self.nu_car : self.nu_car + self.nu_arm],
+                action[self.nu_car + self.nu_arm : ]
+                )
+        # -> (a_car, a_arm, a_gripper)
+
+    def scale_action(self, tanh_action: jax.Array, minval: jax.Array, maxval: jax.Array) -> jax.Array:
+        return 0.5*(maxval - minval)*(tanh_action + 1.0) + 0.5*(maxval + minval)
         
     def reset_car(self, rng_car: jax.Array) -> tuple[jax.Array, jax.Array]:
         return jax.random.uniform(
@@ -244,8 +244,9 @@ class A_to_B(PipelineEnv):
                 maxval=self.car_limits.q_max
                 ), jnp.zeros((self.nq_car, ))
 
+    # WARNING: something is clearly wrong with arm control, don't know if problem is in reset or control
     def reset_arm(self, rng_arm: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return jax.random.uniform(
+        return self.arm_limits.q_start + 0.1*jax.random.uniform(
                 rng_arm,
                 shape=(self.nq_arm,),
                 minval=self.arm_limits.q_min,
@@ -290,13 +291,14 @@ class A_to_B(PipelineEnv):
         return jnp.any(jnp.less_equal(jnp.linalg.norm(jnp.array([q_car[0], q_car[1], 0.1]) - q_ball[:3]), self.goal_radius))
 
     def grip(self) -> jax.Array: 
-        return jnp.array([0.02, -0.025, 0.02, -0.025])
+        return jnp.array([0.02, -0.025, 0.02, -0.025], dtype=jnp.float32)
     
     def release(self) -> jax.Array: 
-        return jnp.array([0.04, 0.05, 0.04, 0.05])
+        return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)
 
     # transforms local polar car action to global cartesian action 
     def car_local_polar_to_global_cartesian(self, car_angle: jax.Array, action: jax.Array) -> jax.Array:
+        assert action.shape == (3, ), f"action.shape = {action.shape} should be {(3, )}."
         v: jax.Array = self.car_velocity_modifier(action[1])*action[0]
         vx: jax.Array = v*jnp.cos(action[1])
         vy: jax.Array = v*jnp.sin(action[1])
@@ -322,6 +324,7 @@ if __name__ == "__main__":
     from brax.io import model
     from matplotlib import pyplot as plt
     from brax.training.agents.ppo import train as ppo 
+    from brax.training.agents.sac import train as sac 
 
 
     OUTPUT_DIR = "demos/assets/"
@@ -377,11 +380,11 @@ if __name__ == "__main__":
 
     train_fn = partial(
             ppo.train, 
-            num_timesteps=30_000_000, num_evals=0, reward_scaling=0.1,
-            episode_length=1000, normalize_observations=True, action_repeat=1,
-            unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
-            discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=2048,
-            batch_size=1024, seed=0
+            num_timesteps=100_000, num_evals=100, reward_scaling=0.1,
+            episode_length=100, normalize_observations=True, action_repeat=1,
+            unroll_length=10, num_minibatches=32, num_updates_per_batch=1,
+            discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
+            num_resets_per_eval=0, batch_size=128, seed=0
             )
 
     x_data = []
@@ -389,15 +392,15 @@ if __name__ == "__main__":
     ydataerr = []
     times = [datetime.now()]
 
-    max_y, min_y = 0, -13000
     def progress(num_steps, metrics):
+        pprint(metrics) 
+        pprint(num_steps)
         times.append(datetime.now())
         x_data.append(num_steps)
         y_data.append(metrics['eval/episode_reward'])
         ydataerr.append(metrics['eval/episode_reward_std'])
 
         plt.xlim([0, train_fn.keywords['num_timesteps'] * 1.25])
-        plt.ylim([min_y, max_y])
 
         plt.xlabel('# environment steps')
         plt.ylabel('reward per episode')
@@ -405,20 +408,19 @@ if __name__ == "__main__":
 
         plt.errorbar(
           x_data, y_data, yerr=ydataerr)
-        plt.show()
 
     # pdb.set_trace()
     make_inference_fn, params, _= train_fn(environment=env, progress_fn=progress)
-
+    plt.show()
     print(f'time to jit: {times[1] - times[0]}')
     print(f'time to train: {times[-1] - times[1]}')
 
-    model_path = '/tmp/mjx_brax_policy'
+    model_path = 'demos/assets/mjx_brax_policy'
     model.save_params(model_path, params)
 
     params = model.load_params(model_path)
 
-    inference_fn = make_inference_fn(params)
+    inference_fn = make_inference_fn(params, deterministic=True)
     jit_inference_fn = jax.jit(inference_fn)
 
     rng = jax.random.PRNGKey(0)
@@ -426,12 +428,13 @@ if __name__ == "__main__":
     rollout = [state.pipeline_state]
 
     n_steps = 500
-    render_every = 2
+    render_every = 1
 
     for i in range(n_steps):
       act_rng, rng = jax.random.split(rng)
       ctrl, _ = jit_inference_fn(state.obs, act_rng)
-      state = jit_step(state, ctrl)
+      assert ctrl.shape == (env.action_size, ), f"ctrl.shape = {ctrl.shape} should be {(env.action_size, )}."
+      state = jit_reset(rng) if i % 100 == 0 else jit_step(state, ctrl)
       rollout.append(state.pipeline_state)
 
       if state.done:

@@ -13,6 +13,17 @@ class PlayingArea:
 
 @dataclass(frozen=True)
 class PandaLimits:
+    # panda-python start pose
+    q_start: Array = field(default_factory=lambda:array([       # rad
+        0.0, 
+        -0.78539816,
+        0.0,
+        -2.35619449,
+        0.0,
+        1.57079633,
+        0.78539816
+        ], dtype=float))
+
     # Cartesian limits
     p_dot_max:      float = 1.7     # m/s
     p_ddot_max:     float = 13.0    # m/s^2
@@ -160,4 +171,4 @@ class ZeusLimits:
 
     # Actuation
     a_min:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_min, ZeusLimits.omega_min], dtype=float))
-    a_max:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))
+    a_max:  Array = field(default_factory=lambda:array([1.0, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))
