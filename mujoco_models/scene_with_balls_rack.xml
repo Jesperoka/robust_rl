@@ -82,9 +82,9 @@
                 friction="0.001" />
         </body>
 
+        <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
         <body name="driving_surface" pos="1.1 0 0.0">
             <body name="driving_surface_top" pos="0 0 0.1">
-                <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
                 <geom pos="0 0 0" size="1 1 0.01" type="box" material="black_plastic" />
             </body>
             <geom pos="0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />

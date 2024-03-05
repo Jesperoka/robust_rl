@@ -108,7 +108,8 @@
 
         </body>
 
-        <body name="ball" pos="-0.15 -0.50 1.3"> <!-- NOTE: BALL DEFINED LAST -->
+        <!-- TODO: simplify contacts (only need contact with finger pads, nothing else) -->
+        <body name="ball" pos="0 0 0"> <!-- NOTE: BALL DEFINED LAST -->
             <joint name="ball_com" type="free" />
             <geom name="ball_soft_contact_layer" type="sphere" size="0.035" material="ball_material"
                 density="0.01" conaffinity="1" />
