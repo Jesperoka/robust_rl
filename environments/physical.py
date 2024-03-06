@@ -1,5 +1,15 @@
-from jax import Array
-from jax.numpy import array
+# TODO: move to tf after confirming everything works
+# ---------------------------------------
+# from jax import Array
+# from jax.numpy import array
+# ---------------------------------------
+
+# WARNING: this is just lazyness for now
+# ---------------------------------------
+from tensorflow import Tensor as Array
+from tensorflow import convert_to_tensor as array 
+# ---------------------------------------
+
 from dataclasses import dataclass, field
 from math import pi 
 
