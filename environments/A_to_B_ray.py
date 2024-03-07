@@ -3,11 +3,11 @@ import tensorflow as tf
 
 from math import pi
 from gymnasium.spaces import Box
-from typing import Callable, List, Optional, Tuple, Union 
+from typing import Callable, List, Optional, Tuple, Union, override
 from functools import partial
 
 from ray.tune.registry import register_env
-from ray.rllib.env import vector_env, base_env
+from ray.rllib.env.base_env import BaseEnv 
 from ray.rllib.utils.typing import (
         EnvActionType,
         EnvID,
@@ -17,33 +17,39 @@ from ray.rllib.utils.typing import (
         MultiEnvDict,
         AgentID,
         )
-
+from mujoco.mjx import Model, Data
 
 from environments.options import EnvironmentOptions 
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
+from environments import utils
 
 
-class A_to_B(vector_env.VectorEnv): # TODO: I don't think there is any point in subclassing from VectorEnv instead of BaseEnv
+
+
+class A_to_B(BaseEnv):
 
     def __init__(self, 
-                 tf_step_fn: Callable,  # jax2tf converted mjx vectorized step function     # TODO: type annotations
+                 mjx_model: Model,
+                 mjx_data: Data,
                  num_envs: int,
-                 nq: int,
-                 nv: int,
-                 nu: int,
                  grip_site_id: int,
                  options: EnvironmentOptions,
                  ) -> None:
+        self.mjx_model: Model = mjx_model
+        self.mjx_data: Data = mjx_data
 
-        self.tf_step_fn: Callable = tf_step_fn      # TODO: type annotations
+        self.vmapped_reset: Callable[[Model, Data, tf.Tensor, tf.Tensor], Data]
+        self.vmapped_step: Callable[[Model, Data, tf.Tensor], Data]
+        self.vmapped_n_step: Callable[[Model, Data, tf.Tensor], Data]
+        self.vmapped_get_site_xpos: Callable[[Data, int], tf.Tensor]
+
+        self.vmapped_reset, self.vmapped_step, self.vmapped_n_step, self.vmapped_get_site_xpos = utils.create_tensorflow_vmapped_mjx_functions(n_step_length=options.n_step_length)
+
         self.num_envs: int = num_envs
-        self.nq: int = nq
-        self.nv: int = nv
-        self.nu: int = nu
         self.grip_site_id: int = grip_site_id
 
-        self.observation_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.nq, )) 
-        self.action_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.nu, ))
+        self.observation_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nq, ))        # type: ignore[override]
+        self.action_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nu, ))             # type: ignore[override]
 
         self.goal_radius: float = options.goal_radius 
         self.reward_function: Callable[[tf.Tensor, tf.Tensor], tf.Tensor] = partial(options.reward_function, self.decode_observation)
@@ -51,24 +57,24 @@ class A_to_B(vector_env.VectorEnv): # TODO: I don't think there is any point in 
         self.arm_controller: Callable[[tf.Tensor], tf.Tensor] = options.arm_controller
 
         self.num_free_joints: int = 1
-        assert self.nq - self.num_free_joints == self.nv, f"self.nq - self.num_free_joints = {self.nq} - {self.num_free_joints} should match self.nv = {self.nv}. 3D angular velocities form a 3D vector space (tangent space of the quaternions)."
+        assert self.mjx_model.nq - self.num_free_joints == self.mjx_model.nv, f"self.nq - self.num_free_joints = {self.mjx_model.nq} - {self.num_free_joints} should match self.mjx_model.nv = {self.mjx_model.nv}. 3D angular velocities form a 3D vector space (tangent space of the quaternions)."
 
         self.nq_car: int = 3
         self.nq_arm: int = 7
         self.nq_gripper: int = 2
         self.nq_ball: int = 7
-        assert self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball == self.nq, f"self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball = {self.nq_car} + {self.nq_arm} + {self.nq_gripper} + {self.nq_ball} should match self.nq = {self.nq}." 
+        assert self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball == self.mjx_model.nq, f"self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball = {self.nq_car} + {self.nq_arm} + {self.nq_gripper} + {self.nq_ball} should match self.mjx_model.nq = {self.mjx_model.nq}." 
 
         self.nv_car: int = 3
         self.nv_arm: int = 7
         self.nv_gripper: int = 2
         self.nv_ball: int = 6 # self.nq_ball - 1
-        assert self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball == self.nv, f"self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball = {self.nv_car} + {self.nv_arm} + {self.nv_gripper} + {self.nv_ball} should match self.nv = {self.nv}."
+        assert self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball == self.mjx_model.nv, f"self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball = {self.nv_car} + {self.nv_arm} + {self.nv_gripper} + {self.nv_ball} should match self.mjx_model.nv = {self.mjx_model.nv}."
 
         self.nu_car: int = 3
         self.nu_arm: int = 7
         self.nu_gripper: int = 4
-        assert self.nu_car + self.nu_arm + self.nu_gripper == self.nu, f"self.nu_car + self.nu_arm + self.nu_gripper = {self.nu_car} + {self.nu_arm} + {self.nu_gripper} should match self.nu = {self.nu}."
+        assert self.nu_car + self.nu_arm + self.nu_gripper == self.mjx_model.nu, f"self.nu_car + self.nu_arm + self.nu_gripper = {self.nu_car} + {self.nu_arm} + {self.nu_gripper} should match self.nu = {self.mjx_model.nu}."
 
         self.car_limits: ZeusLimits = ZeusLimits()
         assert self.car_limits.q_min.shape[0] == self.nq_car, f"self.car_limits.q_min.shape[0] = {self.car_limits.q_min.shape[0]} should match self.nq_car = {self.nq_car}."
@@ -88,87 +94,61 @@ class A_to_B(vector_env.VectorEnv): # TODO: I don't think there is any point in 
         assert self.car_limits.y_max <= self.playing_area.y_center + self.playing_area.half_y_length, f"self.car_limits.y_max = {self.car_limits.y_max} should be less than or equal to self.playing_area.y_center + self.playing_area.half_y_length = {self.playing_area.y_center + self.playing_area.half_y_length}."
         assert self.car_limits.y_min >= self.playing_area.y_center - self.playing_area.half_y_length, f"self.car_limits.y_min = {self.car_limits.y_min} should be greater than or equal to self.playing_area.y_center - self.playing_area.half_y_length = {self.playing_area.y_center - self.playing_area.half_y_length}."
 
+    @override 
+    def poll(self) -> tuple[MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict]:
 
-    # TODO: implement
-    def vector_reset(self, *, seeds: Optional[List[int]] = None, options: Optional[List[dict]] = None) -> Tuple[List[EnvObsType], List[EnvInfoDict]]:
-        seeds = tf.random.split(seeds[0], 3)
         
-        raise NotImplementedError
+
+        return {}, {}, {}, {}, {}, {}
+    # -> (observations, rewards, terminated, truncated, info)
+
+
+
+
+    def reset(self, rng: tf.Tensor) -> tf.Tensor:
+        rng, qpos, qvel = self.init_1(rng)                                                                          # type: ignore[attr-defined]
+        self.mjx_data = self.vmapped_reset(self.mjx_model, self.mjx_data, qpos, qvel)
+        grip_site: tf.Tensor = self.vmapped_get_site_xpos(self.mjx_data, self.grip_site_id)                                         
+        rng, q_ball, qd_ball, p_goal = self.init_2(rng, grip_site)                                                  # type: ignore[attr-defined]
+
+        qpos: tf.Tensor = tf.concat((qpos[:, 0 : -self.nq_ball], q_ball), axis=1)                                   # type: ignore[attr-defined]
+        qvel: tf.Tensor = tf.concat((qvel[:, 0 : -self.nv_ball], qd_ball), axis=1)                                  # type: ignore[attr-defined]
+        assert qpos.shape == (self.num_envs, self.mjx_model.nq), f"qpos.shape = {qpos.shape} should be equal to (self.num_envs, self.mjx_model.nq) = ({self.num_envs}, {self.mjx_model.nq})."
+        assert qvel.shape == (self.num_envs, self.mjx_model.nv), f"qvel.shape = {qvel.shape} should be equal to (self.num_envs, self.mjx_model.nv) = ({self.num_envs}, {self.mjx_model.nv})."
+
+        self.mjx_data = self.vmapped_reset(self.mjx_model, self.mjx_data, qpos, qvel)
+
+        observation = tf.concat((qpos, qvel, p_goal), axis=1)                                                       # type: ignore[attr-defined]
+        assert observation.shape == self.observation_space.shape, f"observation.shape = {observation.shape} should be equal to self.observation_space.shape = {self.observation_space.shape}." # type: ignore[attr-defined]
+
+        return observation                                                                                          # type: ignore[assignment]
+
+
+    @tf.function(jit_compile=True)
+    def init_1(self, rng: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        rng, rng_car, rng_arm, rng_gripper = tf.vectorized_map(tf.random.split, (rng, 4))                           # type: ignore[attr-defined]                                
+        q_car, qd_car = tf.vectorized_map(self.reset_car, (rng_car, ))                                              # type: ignore[attr-defined]
+        q_arm, qd_arm = tf.vectorized_map(self.reset_arm, (rng_arm, ))                                              # type: ignore[attr-defined]
+        q_gripper, qd_gripper = tf.vectorized_map(self.reset_gripper, (rng_gripper, ))                              # type: ignore[attr-defined]
+
+        q_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nq_ball, ))
+        qd_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nv_ball, ))
+
+        return (
+                rng, 
+                tf.concat((q_car, q_arm, q_gripper, q_ball_placeholder), axis=1), 
+                tf.concat((qd_car, qd_arm, qd_gripper, qd_ball_placeholder), axis=1)
+                )                                                                                                   # type: ignore[assignment]
+
+    @tf.function(jit_compile=True)
+    def init_2(self, rng: tf.Tensor, grip_site: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+        rng, rng_ball, rng_goal = tf.vectorized_map(tf.random.split, (rng, 3))                                      # type: ignore[attr-defined]
+        q_ball, qd_ball = tf.vectorized_map(self.reset_ball, (rng_ball, grip_site))                                 # type: ignore[attr-defined]
+        p_goal = tf.vectorized_map(self.reset_goal, (rng_goal, ))                                                   # type: ignore[attr-defined]
+
+        return rng, (q_ball, qd_ball, p_goal)                                                                       # type: ignore[assignment]
         
-    # NOTE: I shouldn't need this, since I'm defining my own VectorEnvWrapper
-    def reset_at(self,index: Optional[int] = None, *, seed: Optional[int] = None, options: Optional[dict] = None,) -> Union[Tuple[EnvObsType, EnvInfoDict], Exception]:
-        raise NotImplementedError
 
-    # TODO: implement
-    def restart_at(self, index: Optional[int] = None) -> None:
-        """Restarts a single sub-environment.
-
-        Args:
-            index: An optional sub-env index to restart.
-        """
-        raise NotImplementedError
-
-    # TODO: implement
-    def vector_step(
-        self, actions: List[EnvActionType]
-    ) -> Tuple[
-        List[EnvObsType], List[float], List[bool], List[bool], List[EnvInfoDict]
-    ]:
-        """Performs a vectorized step on all sub environments using `actions`.
-
-        Args:
-            actions: List of actions (one for each sub-env).
-
-        Returns:
-            A tuple consisting of
-            1) New observations for each sub-env.
-            2) Reward values for each sub-env.
-            3) Terminated values for each sub-env.
-            4) Truncated values for each sub-env.
-            5) Info values for each sub-env.
-        """
-        raise NotImplementedError
-
-    def to_base_env(
-        self,
-        make_env: Optional[Callable[[int], EnvType]] = None,
-        num_envs: int = 1,
-        remote_envs: bool = False,
-        remote_env_batch_wait_ms: int = 0,
-        restart_failed_sub_environments: bool = False,
-    ) -> "BaseEnv":
-        """Converts an RLlib MultiAgentEnv into a BaseEnv object.
-
-        The resulting BaseEnv is always vectorized (contains n
-        sub-environments) to support batched forward passes, where n may
-        also be 1. BaseEnv also supports async execution via the `poll` and
-        `send_actions` methods and thus supports external simulators.
-
-        Args:
-            make_env: A callable taking an int as input (which indicates
-                the number of individual sub-environments within the final
-                vectorized BaseEnv) and returning one individual
-                sub-environment.
-            num_envs: The number of sub-environments to create in the
-                resulting (vectorized) BaseEnv. The already existing `env`
-                will be one of the `num_envs`.
-            remote_envs: Whether each sub-env should be a @ray.remote
-                actor. You can set this behavior in your config via the
-                `remote_worker_envs=True` option.
-            remote_env_batch_wait_ms: The wait time (in ms) to poll remote
-                sub-environments for, if applicable. Only used if
-                `remote_envs` is True.
-
-        Returns:
-            The resulting BaseEnv object.
-        """
-        env = vector_env.VectorEnvWrapper(self) # BUG: I probably need to write my own wrapper
-        return env
-
-    # NOTE: ideally I shouldn't need this, since I'm subclassing from VectorEnv
-    def get_sub_environments(self) -> List[EnvType]:
-        raise NotImplementedError
-        # return []
 
     def decode_action(self, action: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         return (
@@ -262,28 +242,26 @@ if __name__ == "__main__":
     from functools import partial
     from mujoco import mjx, MjModel, MjData, mj_name2id                                                             # type: ignore[import]
     from mujoco.mjtObj import mjOBJ_SITE
+    from gc import collect
     
 
     SCENE = "mujoco_models/scene.xml"
 
+    model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
+    data: MjData = MjData(model)
+    mjx_model: mjx.Model = mjx.put_model(model)
+    mjx_data: mjx.Data = mjx.put_data(model, data)
+    grip_site_id: int = mj_name2id(model, mjOBJ_SITE.value, "grip_site")
+
+    num_envs: int = 4096
     options: EnvironmentOptions = EnvironmentOptions(
         reward_function = None,
         car_controller = None,
         arm_controller = None,
         control_time = 0.01,
+        n_step_length = 5,
         goal_radius = 0.1,
         )
 
-    num_envs: int = 4096
-    
-    model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
-    data: MjData = MjData(model)
-    mjx_model = mjx.put_model(model)
-    mjx_data = mjx.put_data(model, data)
-    grip_site_id: int = mj_name2id(model, mjOBJ_SITE.value, "grip_site")
-
-    tf_step_fn: Callable = mjx.step
-
-    
-    register_env(A_to_B.__name__, partial(A_to_B, tf_step_fn, num_envs, model.nq, model.nv, model.nu, grip_site_id, options))
-
+    register_env(A_to_B.__name__, partial(A_to_B, mjx_model, mjx_data, grip_site_id, options))
+    collect()
