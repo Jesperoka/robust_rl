@@ -28,7 +28,8 @@ from environments import utils
 # and types-tensorflow prevents my LSP from jumping to actual definitions instead of stubs
 
 class A_to_B(BaseEnv):
-    
+    empty: bool = True
+
     vmapped_reset:          Callable[[Model, Data, tf.Tensor, tf.Tensor], Data]
     vmapped_step:           Callable[[Model, Data, tf.Tensor], Data]
     vmapped_n_step:         Callable[[Model, Data, tf.Tensor], Data]
@@ -44,8 +45,8 @@ class A_to_B(BaseEnv):
         self.vmapped_reset, self.vmapped_step, self.vmapped_n_step, self.vmapped_get_site_xpos = utils.create_tensorflow_vmapped_mjx_functions(n_step_length=options.n_step_length)
 
         self.mjx_model: Model = mjx_model
-        self.mjx_data:  Data = self.vmapped_reset(mjx_model, mjx_data, tf.zeros((options.num_envs, mjx_model.nq)), tf.zeros((num_envs, mjx_model.nv))) 
-        self.p_goal:    tf.Tensor = tf.zeros((num_envs, 2), dtype=tf.float32)
+        self.mjx_data:  Data = self.vmapped_reset(mjx_model, mjx_data, tf.zeros((options.num_envs, mjx_model.nq)), tf.zeros((options.num_envs, mjx_model.nv))) 
+        self.p_goal:    tf.Tensor = tf.zeros((options.num_envs, 2), dtype=tf.float32)
 
         self.num_envs:      int = options.num_envs
         self.grip_site_id:  int = grip_site_id
@@ -76,7 +77,7 @@ class A_to_B(BaseEnv):
         assert self.nu_car + self.nu_arm + self.nu_gripper == self.mjx_model.nu, f"self.nu_car + self.nu_arm + self.nu_gripper = {self.nu_car} + {self.nu_arm} + {self.nu_gripper} should match self.nu = {self.mjx_model.nu}."
 
         self.observation_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nq, ))        # type: ignore[override]
-        self.action_space:      Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nu, ))             # type: ignore[override]
+        self.action_space:      Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nu, ))        # type: ignore[override]
 
         self.observation:    tf.Tensor = tf.zeros((self.num_envs, self.mjx_model.nq), dtype=tf.float32)
         self.reward:         tf.Tensor
@@ -102,6 +103,8 @@ class A_to_B(BaseEnv):
         assert self.car_limits.y_max <= self.playing_area.y_center + self.playing_area.half_y_length, f"self.car_limits.y_max = {self.car_limits.y_max} should be less than or equal to self.playing_area.y_center + self.playing_area.half_y_length = {self.playing_area.y_center + self.playing_area.half_y_length}."
         assert self.car_limits.y_min >= self.playing_area.y_center - self.playing_area.half_y_length, f"self.car_limits.y_min = {self.car_limits.y_min} should be greater than or equal to self.playing_area.y_center - self.playing_area.half_y_length = {self.playing_area.y_center - self.playing_area.half_y_length}."
 
+    # ---------------------------------- begin rllib overrides ----------------------------------
+    # -------------------------------------------------------------------------------------------
     @override 
     def poll(self) -> tuple[MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict]:
         """
@@ -127,17 +130,18 @@ class A_to_B(BaseEnv):
         self.empty = True
 
         return (
-                {i: {0: row, 1: row} for i, row in enumerate(tf.unstack(self.observation, num=self.num_envs, axis=0))}, # type: ignore[assignment]
-                {i: {0: row, 1: row} for i, row in enumerate(tf.unstack(self.reward,      num=self.num_envs, axis=0))}, # type: ignore[assignment]
-                {i: {0: row, 1: row} for i, row in enumerate(tf.unstack(self.done,        num=self.num_envs, axis=0))}, # type: ignore[assignment]
-                {i: {0: row, 1: row} for i, row in enumerate(tf.unstack(self.truncated,   num=self.num_envs, axis=0))}, # type: ignore[assignment]
-                {i: {0: row, 1: row} for i, row in enumerate(tf.unstack(self.info,        num=self.num_envs, axis=0))}, # type: ignore[assignment]
+                {i: {0: row, 1: row}       for i, row in enumerate(tf.unstack(self.observation, num=self.num_envs, axis=0))}, # type: ignore[assignment]
+                {i: {0: row[0], 1: row[1]} for i, row in enumerate(tf.unstack(self.reward,      num=self.num_envs, axis=0))}, # type: ignore[assignment]
+                {i: {0: row, 1: row}       for i, row in enumerate(tf.unstack(self.done,        num=self.num_envs, axis=0))}, # type: ignore[assignment]
+                {i: {0: row, 1: row}       for i, row in enumerate(tf.unstack(self.truncated,   num=self.num_envs, axis=0))}, # type: ignore[assignment]
+                {i: {0: row, 1: row}       for i, row in enumerate(tf.unstack(self.info,        num=self.num_envs, axis=0))}, # type: ignore[assignment]
                 {}
                 )
 
     @override
     def send_actions(self, action_dict: MultiEnvDict) -> None:
-        action: tf.Tensor = tf.concat([action_dict[i][0] for i in range(self.num_envs)], axis=0)                   # type: ignore[attr-defined] 
+        action: tf.Tensor = tf.concat([action_dict[i][0] for i in range(self.num_envs)], axis=0)                    # type: ignore[attr-defined] 
+
         self.observation, self.reward, self.done, self.truncated, self.info = self.step(action)
         self.empty = False
 
@@ -150,14 +154,17 @@ class A_to_B(BaseEnv):
     ) -> Tuple[Optional[MultiEnvDict], Optional[MultiEnvDict]]:
         
         return None, None
+    # -------------------------------------------------------------------------------------------
+    # ----------------------------------- end rllib overrides -----------------------------------
 
-    # TODO: add raise NotImplementedError on all methods I don't imlement to debug what gets called
 
+    # --------------------------------------- begin reset --------------------------------------- 
+    # -------------------------------------------------------------------------------------------
     def reset(self, rng: tf.Tensor) -> tf.Tensor:
-        rng, qpos, qvel = self.init_1(rng)                                                                          # type: ignore[attr-defined]
+        rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       # type: ignore[attr-defined]
         self.mjx_data = self.vmapped_reset(self.mjx_model, self.mjx_data, qpos, qvel)
         grip_site: tf.Tensor = self.vmapped_get_site_xpos(self.mjx_data, self.grip_site_id)                                         
-        rng, q_ball, qd_ball, p_goal = self.init_2(rng, grip_site)                                                  # type: ignore[attr-defined]
+        rng, q_ball, qd_ball, p_goal = self.reset_ball_and_goal(rng, grip_site)                                     # type: ignore[attr-defined]
 
         qpos: tf.Tensor = tf.concat((qpos[:, 0 : -self.nq_ball], q_ball), axis=1)                                   # type: ignore[attr-defined]
         qvel: tf.Tensor = tf.concat((qvel[:, 0 : -self.nv_ball], qd_ball), axis=1)                                  # type: ignore[attr-defined]
@@ -167,18 +174,18 @@ class A_to_B(BaseEnv):
         self.mjx_data = self.vmapped_reset(self.mjx_model, self.mjx_data, qpos, qvel)
 
         observation = tf.concat((qpos, qvel, p_goal), axis=1)                                                       # type: ignore[attr-defined]
-        assert observation.shape == self.observation_space.shape, f"observation.shape = {observation.shape} should be equal to self.observation_space.shape = {self.observation_space.shape}." # type: ignore[attr-defined]
+        assert observation.shape == (self.num_envs, *self.observation_space.shape), f"observation.shape = {observation.shape} should be equal to (self.num_envs, *self.observation_space.shape) = ({self.num_envs}, *{self.observation_space.shape})."  # type: ignore[attr-defined]
 
         return observation                                                                                          # type: ignore[assignment]
 
     @tf.function(jit_compile=True)
-    def init_1(self, rng: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    def reset_car_arm_and_gripper(self, rng: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         rng, rng_car, rng_arm, rng_gripper = tf.vectorized_map(tf.random.split, (rng, 4))                           # type: ignore[attr-defined]                                
         q_car, qd_car = tf.vectorized_map(self.reset_car, (rng_car, ))                                              # type: ignore[attr-defined]
         q_arm, qd_arm = tf.vectorized_map(self.reset_arm, (rng_arm, ))                                              # type: ignore[attr-defined]
         q_gripper, qd_gripper = tf.vectorized_map(self.reset_gripper, (rng_gripper, ))                              # type: ignore[attr-defined]
 
-        q_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nq_ball, ))
+        q_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nq_ball, )) # BUG: I probably need to tf.zeros((self.num_envs, self.nq_ball))?
         qd_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nv_ball, ))
 
         return (
@@ -188,64 +195,77 @@ class A_to_B(BaseEnv):
                 )                                                                                                   # type: ignore[assignment]
 
     @tf.function(jit_compile=True)
-    def init_2(self, rng: tf.Tensor, grip_site: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    def reset_ball_and_goal(self, rng: tf.Tensor, grip_site: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         rng, rng_ball, rng_goal = tf.vectorized_map(tf.random.split, (rng, 3))                                      # type: ignore[attr-defined]
         q_ball, qd_ball = tf.vectorized_map(self.reset_ball, (rng_ball, grip_site))                                 # type: ignore[attr-defined]
         p_goal = tf.vectorized_map(self.reset_goal, (rng_goal, ))                                                   # type: ignore[attr-defined]
 
         return rng, (q_ball, qd_ball, p_goal)                                                                       # type: ignore[assignment]
+    # ---------------------------------------- end reset ---------------------------------------- 
+    # -------------------------------------------------------------------------------------------
 
 
-
+    # --------------------------------------- begin step ---------------------------------------- 
+    # -------------------------------------------------------------------------------------------
     def step(self, action: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-        # NOTE: Everything from here
-        # -------------------------------------------------------------------------------------------
-        # just type declarations
-        q_car: tf.Tensor; q_arm: tf.Tensor; q_gripper: tf.Tensor; q_ball: tf.Tensor; qd_car: tf.Tensor; 
-        qd_arm: tf.Tensor; qd_gripper: tf.Tensor; qd_ball: tf.Tensor; p_goal: tf.Tensor
-        a_car: tf.Tensor; a_arm: tf.Tensor; a_gripper: tf.Tensor
-
-        a_car, a_arm, a_gripper = self.decode_action(action)
-
-        car_orientation:    tf.Tensor = self.mjx_data.qpos[2] # NOTE: this should work fine, but maybe we want to  add goal as a site in the model? 
-        car_scaled_action:  tf.Tensor = self.scale_action(a_car, self.car_limits.a_min, self.car_limits.a_max)
-        car_local_ctrl:     tf.Tensor = self.car_controller(car_scaled_action)
-        ctrl_car:           tf.Tensor = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1])   # type: ignore[attr-defined]
-
-        arm_scaled_action:  tf.Tensor = self.scale_action(a_arm, self.arm_limits.tau_min, self.arm_limits.tau_max)
-        ctrl_arm:           tf.Tensor = self.arm_controller(arm_scaled_action)
-        ctrl_gripper:       tf.Tensor = tf.cond(a_gripper[0] > 0.0, self.grip, self.release)                        # type: ignore[attr-defined]
-
-        ctrl: tf.Tensor = tf.concat([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)
-        # NOTE: to here, should be jittable by tensorflow
-        # -------------------------------------------------------------------------------------------
-        
-        # WARNING: not-jittable by tensorflow
-        # -------------------------------------------------------------------------------------------
+        ctrl: tf.Tensor = self.compute_controls(action)
         self.mjx_data: Data = self.vmapped_step(self.mjx_model, self.mjx_data, ctrl)
-        observation: tf.Tensor = self.observe()
-        # WARNING: 
-        # -------------------------------------------------------------------------------------------
-
-        # NOTE: everything from here to the end should be jittable by tensorflow
-        # -------------------------------------------------------------------------------------------
-        q_car, q_arm, q_gripper, q_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal = self.decode_observation(observation)
-
-        car_outside_limits: tf.Tensor = self.outside_limits(q_car, self.car_limits.q_min, self.car_limits.q_max)            # car pos
-        arm_outside_limits: tf.Tensor = self.outside_limits(qd_arm, self.arm_limits.q_dot_min, self.arm_limits.q_dot_max)   # arm vel
-
-        car_goal_reached: tf.Tensor = self.car_goal_reached(q_car, p_goal)
-        arm_goal_reached: tf.Tensor = self.arm_goal_reached(q_car, q_ball)
-
-        reward: tf.Tensor = self.reward_function(observation, action) - 100.0*(car_outside_limits + arm_outside_limits)                     # type: ignore[attr-defined]
-        done: tf.Tensor = tf.logical_or(car_goal_reached, arm_goal_reached)
-
-        # TODO: create info or do other logging
-        truncated: tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)                                            
-        info: tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)
+        observation: tf.Tensor = self.observe()                                                                     # type: ignore[attr-defined]
+        observation, reward, done, truncated, info = self.evaluate_environment(observation, action)                
 
         return observation, reward, done, truncated, info
     
+    tf.function(jit_compile=True)
+    def compute_controls(self, action: tf.Tensor) -> tf.Tensor:
+        a_car: tf.Tensor; a_arm: tf.Tensor; a_gripper: tf.Tensor
+        a_car, a_arm, a_gripper = self.decode_action(action)
+
+        car_orientation:    tf.Tensor = self.get_car_orientation()
+        car_scaled_action:  tf.Tensor = tf.vectorized_map(self.scale_action, (a_car, self.car_limits.a_min, self.car_limits.a_max))                             # type: ignore[assignment]
+        car_local_ctrl:     tf.Tensor = tf.vectorized_map(self.car_controller, (car_scaled_action, ))                                                           # type: ignore[assignment]
+        ctrl_car:           tf.Tensor = tf.vectorized_map(self.car_local_polar_to_global_cartesian, (car_orientation, car_local_ctrl[0], car_local_ctrl[1]))    # type: ignore[assignment]
+
+        arm_scaled_action:  tf.Tensor = tf.vectorized_map(self.scale_action, (a_arm, self.arm_limits.tau_min, self.arm_limits.tau_max))                         # type: ignore[assignment]
+        ctrl_arm:           tf.Tensor = tf.vectorized_map(self.arm_controller, (arm_scaled_action, ))                                                           # type: ignore[assignment] 
+
+        ctrl_gripper:       tf.Tensor = tf.cond(a_gripper[0] > 0.0, self.grip, self.release)                        # type: ignore[attr-defined]
+
+        ctrl: tf.Tensor = tf.concat([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     # type: ignore[assignment]
+
+        return ctrl
+
+    tf.function(jit_compile=True)
+    def evaluate_environment(self, observation, action) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+        q_car: tf.Tensor; q_arm: tf.Tensor; q_gripper: tf.Tensor; q_ball: tf.Tensor; qd_car: tf.Tensor; qd_arm: tf.Tensor; qd_gripper: tf.Tensor; qd_ball: tf.Tensor; p_goal: tf.Tensor
+        (
+            q_car, q_arm, q_gripper, 
+            q_ball, qd_car, qd_arm, 
+            qd_gripper, qd_ball, p_goal
+         ) = tf.vectorized_map(self.decode_observation, (observation, ))                                            # type: ignore[attr-defined]  
+
+        car_outside_limits: tf.Tensor = tf.vectorized_map(self.outside_limits, (q_car, self.car_limits.q_min, self.car_limits.q_max))                           # type: ignore[assignment] 
+        arm_outside_limits: tf.Tensor = tf.vectorized_map(self.outside_limits, (qd_arm, self.arm_limits.q_dot_min, self.arm_limits.q_dot_max))                  # type: ignore[assignment]
+
+        car_goal_reached: tf.Tensor = tf.vectorized_map(self.car_goal_reached, (q_car, p_goal))                     # type: ignore[assignment]
+        arm_goal_reached: tf.Tensor = tf.vectorized_map(self.arm_goal_reached, (q_car, q_ball))                     # type: ignore[assignment]
+
+        reward: tf.Tensor = tf.vectorized_map(self.reward_function, (observation, action)) - 100.0*(car_outside_limits + arm_outside_limits)                    # type: ignore[attr-defined]
+        done:   tf.Tensor = tf.vectorized_map(tf.logical_or, (car_goal_reached, arm_goal_reached))                  # type: ignore[assignment]
+
+        # TODO: create info or do other logging
+        truncated:  tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)                                            
+        info:       tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)
+
+        return observation, reward, done, truncated, info
+    # ---------------------------------------- end step ----------------------------------------- 
+    # -------------------------------------------------------------------------------------------
+    
+
+    # ------------------------------------ begin subroutines ------------------------------------
+    # -------------------------------------------------------------------------------------------
+    def get_car_orientation(self) -> tf.Tensor:
+        return self.mjx_data.qpos[:, 2]                                                                             # type: ignore[assingment]
+
     
     @tf.function(jit_compile=True) # WARNING: think about whether this should be jitted or not
     def observe(self) -> tf.Tensor:
@@ -354,6 +374,8 @@ class A_to_B(BaseEnv):
     # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
     def car_velocity_modifier(self, theta: tf.Tensor) -> tf.Tensor:
         return 0.5 + 0.5*( tf.abs( ( tf.math.mod(theta, (pi/2.0)) ) - (pi/4.0) ) / (pi/4.0) )
+    # ------------------------------------- end subroutines -------------------------------------
+    # -------------------------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
@@ -384,3 +406,5 @@ if __name__ == "__main__":
 
     register_env(A_to_B.__name__, partial(A_to_B, mjx_model, mjx_data, grip_site_id, options))
     collect()
+
+
