@@ -1,22 +1,18 @@
+from ray.rllib.core.rl_module.marl_module import MultiAgentRLModuleSpec
+from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
+from tensorflow.python.eager.context import num_gpus
 import reproducibility_globals
 import tensorflow as tf
 
 from math import pi
-from gymnasium.spaces import Box
-from typing import Callable, List, Optional, Tuple, Union, override
+from gymnasium.spaces import Box, Space
+from typing import Callable, Optional, Tuple, override
 from functools import partial
 
 from ray.tune.registry import register_env
 from ray.rllib.env.base_env import BaseEnv 
-from ray.rllib.utils.typing import (
-        EnvActionType,
-        EnvID,
-        EnvInfoDict,
-        EnvObsType,
-        EnvType,
-        MultiEnvDict,
-        AgentID,
-        )
+from ray.rllib.utils.typing import EnvID, MultiEnvDict
+
 from mujoco.mjx import Model, Data
 
 from environments.options import EnvironmentOptions 
@@ -24,8 +20,8 @@ from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimi
 from environments import utils
 
 
-# NOTE: this file has a lot of type: ignores because Tensorflow does not play well with pyright, 
-# and types-tensorflow prevents my LSP from jumping to actual definitions instead of stubs
+# NOTE: This file has a lot of type: ignores because Tensorflow does not play well with pyright, 
+# and using types-tensorflow prevents my LSP from jumping to actual definitions instead of stubs.
 
 class A_to_B(BaseEnv):
     empty: bool = True
@@ -51,6 +47,7 @@ class A_to_B(BaseEnv):
         self.num_envs:      int = options.num_envs
         self.grip_site_id:  int = grip_site_id
         self.goal_radius:   float = options.goal_radius 
+        self.prng_seed:     tf.Tensor = tf.random.split(options.prng_seed, self.num_envs)
 
         self.reward_function:   Callable[[tf.Tensor, tf.Tensor], tf.Tensor] = partial(options.reward_function, self.decode_observation)
         self.car_controller:    Callable[[tf.Tensor], tf.Tensor] = options.car_controller 
@@ -76,14 +73,11 @@ class A_to_B(BaseEnv):
         self.nu_gripper:    int = 4
         assert self.nu_car + self.nu_arm + self.nu_gripper == self.mjx_model.nu, f"self.nu_car + self.nu_arm + self.nu_gripper = {self.nu_car} + {self.nu_arm} + {self.nu_gripper} should match self.nu = {self.mjx_model.nu}."
 
-        self.observation_space: Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nq, ))        # type: ignore[override]
-        self.action_space:      Box = Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nu, ))        # type: ignore[override]
-
         self.observation:    tf.Tensor = tf.zeros((self.num_envs, self.mjx_model.nq), dtype=tf.float32)
-        self.reward:         tf.Tensor
-        self.done:           tf.Tensor
-        self.truncated:      tf.Tensor
-        self.info:           tf.Tensor
+        self.reward:         tf.Tensor = tf.zeros((self.num_envs, 2), dtype=tf.float32)
+        self.done:           tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.bool)
+        self.truncated:      tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.bool)
+        self.info:           tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)
 
         self.car_limits: ZeusLimits = ZeusLimits()
         assert self.car_limits.q_min.shape[0] == self.nq_car, f"self.car_limits.q_min.shape[0] = {self.car_limits.q_min.shape[0]} should match self.nq_car = {self.nq_car}."
@@ -140,7 +134,14 @@ class A_to_B(BaseEnv):
 
     @override
     def send_actions(self, action_dict: MultiEnvDict) -> None:
-        action: tf.Tensor = tf.concat([action_dict[i][0] for i in range(self.num_envs)], axis=0)                    # type: ignore[attr-defined] 
+
+        @tf.function(jit_compile=True)
+        def action_dict_to_tensor(action_dict: MultiEnvDict) -> tf.Tensor:
+            return tf.concat(
+                    [tf.concat([agent_dict["Zeus"], agent_dict["Panda"]], axis=1) for agent_dict in action_dict.values()], 
+                    axis=0)                                                                                         # type: ignore[assignment]
+
+        action: tf.Tensor = action_dict_to_tensor(action_dict)                                                      # type: ignore[attr-defined]
 
         self.observation, self.reward, self.done, self.truncated, self.info = self.step(action)
         self.empty = False
@@ -152,8 +153,22 @@ class A_to_B(BaseEnv):
         seed: Optional[int] = None,
         options: Optional[dict] = None,
     ) -> Tuple[Optional[MultiEnvDict], Optional[MultiEnvDict]]:
+
+        @tf.function(jit_compile=True)
+        def split_prng_key(PRNG_key: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+            return tf.vectorized_map(tf.random.split, (PRNG_key, 2))                                                # type: ignore[assignment]
+        
+        self.prng_key, seed = split_prng_key(self.prng_key)                                                         # type: ignore[attr-defined]
+        self.reset(seed)                                                                                            # type: ignore[attr-defined]
         
         return None, None
+
+    @property
+    @override
+    def observation_space(self) -> Space[Box]:
+        return Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nq + self.mjx_model.nv + 2, ), dtype=tf.float32) # type: ignore[assignment]
+
+    def action_space(self) -> Space[Box]: raise NotImplementedError                                                 # type: ignore[override]
     # -------------------------------------------------------------------------------------------
     # ----------------------------------- end rllib overrides -----------------------------------
 
@@ -265,7 +280,6 @@ class A_to_B(BaseEnv):
     # -------------------------------------------------------------------------------------------
     def get_car_orientation(self) -> tf.Tensor:
         return self.mjx_data.qpos[:, 2]                                                                             # type: ignore[assingment]
-
     
     @tf.function(jit_compile=True) # WARNING: think about whether this should be jitted or not
     def observe(self) -> tf.Tensor:
@@ -380,10 +394,13 @@ class A_to_B(BaseEnv):
 
 if __name__ == "__main__":
     from ray.tune.registry import register_env
+    from ray.rllib.algorithms.ppo import PPOConfig
+    from ray.rllib.policy.policy import PolicySpec
     from functools import partial
     from mujoco import mjx, MjModel, MjData, mj_name2id                                                             # type: ignore[import]
     from mujoco.mjtObj import mjOBJ_SITE
     from gc import collect
+    from math import pi
     
 
     SCENE = "mujoco_models/scene.xml"
@@ -401,10 +418,45 @@ if __name__ == "__main__":
         goal_radius     = 0.1,
         control_time    = 0.01,
         n_step_length   = 5,
-        num_envs        = 4096 
+        num_envs        = 4096,
+        prng_seed       = reproducibility_globals.PRNG_SEED
         )
 
     register_env(A_to_B.__name__, partial(A_to_B, mjx_model, mjx_data, grip_site_id, options))
     collect()
 
+    zeus_action_space = Box(
+            low=ZeusLimits().a_min.eval().tolist(), 
+            high=ZeusLimits().a_max.eval().tolist(), 
+            shape=(3, ), dtype=tf.float32)
 
+    panda_action_space = Box(
+            low=PandaLimits().tau_min.eval().tolist()+[-1.0], 
+            high=PandaLimits().tau_max.eval().tolist()+[1.0], 
+            shape=(8, ), dtype=tf.float32)
+
+    config = (
+            PPOConfig()
+            .environment(A_to_B.__name__)
+            .framework("tf2")
+            .multi_agent(
+                policies = {
+                    "Zeus": PolicySpec(action_space=zeus_action_space, config=PPOConfig.overrides(framework_str="tf2")),
+                    "Panda": PolicySpec(action_space=panda_action_space, config=PPOConfig.overrides(framework_str="tf2"))
+                    },
+                policy_mapping_fn = lambda agent_id, *args, **kwargs: agent_id,
+                policies_to_train = ["Zeus", "Panda"]
+                )
+            .resources(num_gpus=1)
+            .rl_module(
+                rl_module_spec=MultiAgentRLModuleSpec(
+                    module_specs={
+                        "Zeus": SingleAgentRLModuleSpec(),
+                        "Panda": SingleAgentRLModuleSpec()
+                        }
+                    )
+                )
+            )
+
+
+    
