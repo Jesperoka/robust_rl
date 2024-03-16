@@ -1,17 +1,15 @@
-from ray.rllib.core.rl_module.marl_module import MultiAgentRLModuleSpec
-from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
-from tensorflow.python.eager.context import num_gpus
 import reproducibility_globals
 import tensorflow as tf
 
 from math import pi
 from gymnasium.spaces import Box, Space
-from typing import Callable, Optional, Tuple, override
+from typing import Callable, Optional, Tuple 
 from functools import partial
 
 from ray.tune.registry import register_env
-from ray.rllib.env.base_env import BaseEnv 
+from ray.rllib.env.base_env import BaseEnv, ASYNC_RESET_RETURN
 from ray.rllib.utils.typing import EnvID, MultiEnvDict
+from ray.rllib.utils.annotations import override
 
 from mujoco.mjx import Model, Data
 
@@ -41,13 +39,15 @@ class A_to_B(BaseEnv):
         self.vmapped_reset, self.vmapped_step, self.vmapped_n_step, self.vmapped_get_site_xpos = utils.create_tensorflow_vmapped_mjx_functions(n_step_length=options.n_step_length)
 
         self.mjx_model: Model = mjx_model
-        self.mjx_data:  Data = self.vmapped_reset(mjx_model, mjx_data, tf.zeros((options.num_envs, mjx_model.nq)), tf.zeros((options.num_envs, mjx_model.nv))) 
+        self.mjx_data:  Data = utils.create_mjx_data_batch(mjx_data, options.num_envs)
+        self.mjx_data:  Data = self.vmapped_reset(self.mjx_model, self.mjx_data, tf.zeros((options.num_envs, mjx_model.nq)), tf.zeros((options.num_envs, mjx_model.nv))) 
         self.p_goal:    tf.Tensor = tf.zeros((options.num_envs, 2), dtype=tf.float32)
 
         self.num_envs:      int = options.num_envs
         self.grip_site_id:  int = grip_site_id
         self.goal_radius:   float = options.goal_radius 
-        self.prng_seed:     tf.Tensor = tf.random.split(options.prng_seed, self.num_envs)
+
+        self.prng_key:  tf.Tensor = tf.random.split(options.prng_seed, options.num_envs)
 
         self.reward_function:   Callable[[tf.Tensor, tf.Tensor], tf.Tensor] = partial(options.reward_function, self.decode_observation)
         self.car_controller:    Callable[[tf.Tensor], tf.Tensor] = options.car_controller 
@@ -99,7 +99,7 @@ class A_to_B(BaseEnv):
 
     # ---------------------------------- begin rllib overrides ----------------------------------
     # -------------------------------------------------------------------------------------------
-    @override 
+    @override(BaseEnv) 
     def poll(self) -> tuple[MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict, MultiEnvDict]:
         """
         returns a tuple of MultiEnvDicts of the form:
@@ -132,7 +132,7 @@ class A_to_B(BaseEnv):
                 {}
                 )
 
-    @override
+    @override(BaseEnv)
     def send_actions(self, action_dict: MultiEnvDict) -> None:
 
         @tf.function(jit_compile=True)
@@ -154,17 +154,17 @@ class A_to_B(BaseEnv):
         options: Optional[dict] = None,
     ) -> Tuple[Optional[MultiEnvDict], Optional[MultiEnvDict]]:
 
-        @tf.function(jit_compile=True)
-        def split_prng_key(PRNG_key: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
-            return tf.vectorized_map(tf.random.split, (PRNG_key, 2))                                                # type: ignore[assignment]
         
-        self.prng_key, seed = split_prng_key(self.prng_key)                                                         # type: ignore[attr-defined]
-        self.reset(seed)                                                                                            # type: ignore[attr-defined]
+        # self.prng_key, reset_rng = tf.vectorized_map(partial(tf.random.split, num=2), self.prng_key)              # type: ignore[attr-defined]
+        self.prng_key, reset_rng = self.vmapped_tf_random_split(self.prng_key, 2)                                   # type: ignore[attr-defined]
+        # assert False, f"{self.prng_key.shape}, {reset_rng.shape}, {self.prng_key.dtype}, {reset_rng.dtype}"
+
+        observation, info = self.reset(reset_rng)                                                                   # type: ignore[attr-defined]
         
-        return None, None
+        return (ASYNC_RESET_RETURN, ASYNC_RESET_RETURN) 
 
     @property
-    @override
+    @override(BaseEnv)
     def observation_space(self) -> Space[Box]:
         return Box(low=-float("inf"), high=float("inf"), shape=(self.mjx_model.nq + self.mjx_model.nv + 2, ), dtype=tf.float32) # type: ignore[assignment]
 
@@ -188,20 +188,21 @@ class A_to_B(BaseEnv):
 
         self.mjx_data = self.vmapped_reset(self.mjx_model, self.mjx_data, qpos, qvel)
 
-        observation = tf.concat((qpos, qvel, p_goal), axis=1)                                                       # type: ignore[attr-defined]
+        observation:    tf.Tensor = tf.concat((qpos, qvel, p_goal), axis=1)                                         # type: ignore[attr-defined]
+        info:           tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)                                   # type: ignore[assignment]
         assert observation.shape == (self.num_envs, *self.observation_space.shape), f"observation.shape = {observation.shape} should be equal to (self.num_envs, *self.observation_space.shape) = ({self.num_envs}, *{self.observation_space.shape})."  # type: ignore[attr-defined]
-
-        return observation                                                                                          # type: ignore[assignment]
+    
+        return observation, info                                                                                    # type: ignore[assignment]
 
     @tf.function(jit_compile=True)
     def reset_car_arm_and_gripper(self, rng: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        rng, rng_car, rng_arm, rng_gripper = tf.vectorized_map(tf.random.split, (rng, 4))                           # type: ignore[attr-defined]                                
-        q_car, qd_car = tf.vectorized_map(self.reset_car, (rng_car, ))                                              # type: ignore[attr-defined]
-        q_arm, qd_arm = tf.vectorized_map(self.reset_arm, (rng_arm, ))                                              # type: ignore[attr-defined]
-        q_gripper, qd_gripper = tf.vectorized_map(self.reset_gripper, (rng_gripper, ))                              # type: ignore[attr-defined]
+        rng, rng_car, rng_arm, rng_gripper = self.vmapped_tf_random_split(rng, 4)                                   # type: ignore[attr-defined]                                
+        q_car, qd_car = tf.vectorized_map(self.reset_car, rng_car)                                                  # type: ignore[attr-defined]
+        q_arm, qd_arm = tf.vectorized_map(self.reset_arm, rng_arm)                                                  # type: ignore[attr-defined]
+        q_gripper, qd_gripper = tf.vectorized_map(self.reset_gripper, rng_gripper)                                  # type: ignore[attr-defined]
 
-        q_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nq_ball, )) # BUG: I probably need to tf.zeros((self.num_envs, self.nq_ball))?
-        qd_ball_placeholder = tf.vectorized_map(tf.zeros, (self.nv_ball, ))
+        q_ball_placeholder = tf.zeros((self.num_envs, self.nq_ball)) 
+        qd_ball_placeholder = tf.zeros((self.num_envs, self.nv_ball))
 
         return (
                 rng, 
@@ -211,9 +212,10 @@ class A_to_B(BaseEnv):
 
     @tf.function(jit_compile=True)
     def reset_ball_and_goal(self, rng: tf.Tensor, grip_site: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-        rng, rng_ball, rng_goal = tf.vectorized_map(tf.random.split, (rng, 3))                                      # type: ignore[attr-defined]
-        q_ball, qd_ball = tf.vectorized_map(self.reset_ball, (rng_ball, grip_site))                                 # type: ignore[attr-defined]
-        p_goal = tf.vectorized_map(self.reset_goal, (rng_goal, ))                                                   # type: ignore[attr-defined]
+        rng, rng_ball, rng_goal = self.vmapped_tf_random_split(rng, 3)                                              # type: ignore[attr-defined]
+        q_ball, qd_ball = tf.vectorized_map(partial(self.reset_ball, grip_site=grip_site), rng_ball) #BUG: grip_site also batched                           # type: ignore[attr-defined]
+        assert False, f"{q_ball.shape}, {qd_ball.shape}"
+        p_goal = tf.vectorized_map(self.reset_goal, rng_goal)                                                       # type: ignore[attr-defined]
 
         return rng, (q_ball, qd_ball, p_goal)                                                                       # type: ignore[assignment]
     # ---------------------------------------- end reset ---------------------------------------- 
@@ -236,12 +238,12 @@ class A_to_B(BaseEnv):
         a_car, a_arm, a_gripper = self.decode_action(action)
 
         car_orientation:    tf.Tensor = self.get_car_orientation()
-        car_scaled_action:  tf.Tensor = tf.vectorized_map(self.scale_action, (a_car, self.car_limits.a_min, self.car_limits.a_max))                             # type: ignore[assignment]
-        car_local_ctrl:     tf.Tensor = tf.vectorized_map(self.car_controller, (car_scaled_action, ))                                                           # type: ignore[assignment]
-        ctrl_car:           tf.Tensor = tf.vectorized_map(self.car_local_polar_to_global_cartesian, (car_orientation, car_local_ctrl[0], car_local_ctrl[1]))    # type: ignore[assignment]
+        car_scaled_action:  tf.Tensor = tf.vectorized_map(partial(self.scale_action, minval=self.car_limits.a_min, maxval=self.car_limits.a_max), a_car)                            # type: ignore[assignment]
+        car_local_ctrl:     tf.Tensor = tf.vectorized_map(self.car_controller, car_scaled_action)                                                                                   # type: ignore[assignment]
+        ctrl_car:           tf.Tensor = tf.vectorized_map(partial(self.car_local_polar_to_global_cartesian, magnitude=car_local_ctrl[0], angle=car_local_ctrl[1]), car_orientation) # type: ignore[assignment]
 
-        arm_scaled_action:  tf.Tensor = tf.vectorized_map(self.scale_action, (a_arm, self.arm_limits.tau_min, self.arm_limits.tau_max))                         # type: ignore[assignment]
-        ctrl_arm:           tf.Tensor = tf.vectorized_map(self.arm_controller, (arm_scaled_action, ))                                                           # type: ignore[assignment] 
+        arm_scaled_action:  tf.Tensor = tf.vectorized_map(self.scale_action, (a_arm, self.arm_limits.tau_min, self.arm_limits.tau_max))                                             # type: ignore[assignment]
+        ctrl_arm:           tf.Tensor = tf.vectorized_map(self.arm_controller, arm_scaled_action)                   # type: ignore[assignment] 
 
         ctrl_gripper:       tf.Tensor = tf.cond(a_gripper[0] > 0.0, self.grip, self.release)                        # type: ignore[attr-defined]
 
@@ -256,17 +258,18 @@ class A_to_B(BaseEnv):
             q_car, q_arm, q_gripper, 
             q_ball, qd_car, qd_arm, 
             qd_gripper, qd_ball, p_goal
-         ) = tf.vectorized_map(self.decode_observation, (observation, ))                                            # type: ignore[attr-defined]  
+         ) = tf.vectorized_map(self.decode_observation, observation)                                                # type: ignore[attr-defined]  
 
-        car_outside_limits: tf.Tensor = tf.vectorized_map(self.outside_limits, (q_car, self.car_limits.q_min, self.car_limits.q_max))                           # type: ignore[assignment] 
-        arm_outside_limits: tf.Tensor = tf.vectorized_map(self.outside_limits, (qd_arm, self.arm_limits.q_dot_min, self.arm_limits.q_dot_max))                  # type: ignore[assignment]
+        car_outside_limits: tf.Tensor = tf.vectorized_map(partial(self.outside_limits, minval=self.car_limits.q_min, maxval=self.car_limits.q_max), q_car)                    # type: ignore[assignment] 
+        arm_outside_limits: tf.Tensor = tf.vectorized_map(partial(self.outside_limits, minval=self.arm_limits.q_min, maxval=self.arm_limits.q_max), q_arm)                    # type: ignore[assignment]
 
         car_goal_reached: tf.Tensor = tf.vectorized_map(self.car_goal_reached, (q_car, p_goal))                     # type: ignore[assignment]
         arm_goal_reached: tf.Tensor = tf.vectorized_map(self.arm_goal_reached, (q_car, q_ball))                     # type: ignore[assignment]
 
         reward: tf.Tensor = tf.vectorized_map(self.reward_function, (observation, action)) - 100.0*(car_outside_limits + arm_outside_limits)                    # type: ignore[attr-defined]
-        done:   tf.Tensor = tf.vectorized_map(tf.logical_or, (car_goal_reached, arm_goal_reached))                  # type: ignore[assignment]
+        done:   tf.Tensor = tf.vectorized_map(tf.logical_or, (car_goal_reached, arm_goal_reached)) # BUG: no point in vmapping # type: ignore[assignment]
 
+        # NOTE: need to use "__all__"
         # TODO: create info or do other logging
         truncated:  tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)                                            
         info:       tf.Tensor = tf.zeros((self.num_envs, ), dtype=tf.float32)
@@ -315,6 +318,7 @@ class A_to_B(BaseEnv):
         return 0.5*tf.math.subtract(maxval,minval)*tf.math.add(tanh_action, 1.0) + 0.5*tf.math.add(maxval,minval)
 
     def reset_car(self, rng_car: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+        # assert False, f"{type(rng_car)}, {rng_car.shape}, {rng_car.dtype}"
         return tf.random.stateless_uniform(
                 shape=(self.nq_car,),
                 seed=rng_car, 
@@ -332,30 +336,29 @@ class A_to_B(BaseEnv):
 
     def reset_gripper(self, rng_gripper: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         return tf.concat([                                        
-            tf.constant([0.02, 0.02]) + tf.random.stateless_uniform(
+            tf.constant([0.02, 0.02], dtype=tf.float32) + tf.random.stateless_uniform(
                 shape=(self.nq_gripper,),
                 seed=rng_gripper,
                 minval=tf.constant([-0.0005, -0.0005]),                                                             # type: ignore[arg-type]
-                maxval=tf.constant([0.0005, 0.0005])
+                maxval=tf.constant([0.0005, 0.0005]),
                 )
             ], axis=0), tf.zeros((self.nq_gripper, ))
 
     def reset_ball(self, rng_ball: tf.Tensor, grip_site: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
-        return tf.concat([                                         
-            grip_site + tf.random.stateless_uniform(
-                shape=(3,),
-                seed=rng_ball,
-                minval=tf.constant([-0.001, -0.001, -0.001]),                                                       # type: ignore[arg-type] 
-                maxval=tf.constant([0.001, 0.001, 0.001])
-            ), 
-            tf.constant([1, 0, 0, 0])], axis=0), tf.zeros((self.nq_ball - 1, ))
+        return tf.concat([grip_site, tf.constant([1, 0, 0, 0], dtype=tf.float32)], axis=1)\
+                + tf.random.stateless_uniform(
+                             shape=(self.nq_ball,), 
+                             seed=rng_ball,
+                             minval=tf.constant([-0.001, -0.001, -0.001, 0, 0, 0, 0]),                              # type: ignore[arg-type] 
+                             maxval=tf.constant([0.001, 0.001, 0.001, 0, 0, 0, 0])
+                ), tf.zeros((self.nq_ball - 1, ))
 
     def reset_goal(self, rng_goal: tf.Tensor) -> tf.Tensor:
         return tf.random.stateless_uniform(
                 shape=(2,),
                 seed=rng_goal,
-                minval=tf.constant([self.car_limits.x_min, self.car_limits.y_min]),                                 # type: ignore[arg-type]
-                maxval=tf.constant([self.car_limits.x_max, self.car_limits.y_max]),
+                minval=tf.constant([self.car_limits.x_min, self.car_limits.y_min], dtype=tf.float32),               # type: ignore[arg-type]
+                maxval=tf.constant([self.car_limits.x_max, self.car_limits.y_max], dtype=tf.float32),
                 )
 
     def outside_limits(self, arr: tf.Tensor, minval: tf.Tensor, maxval: tf.Tensor) -> tf.Tensor:
@@ -368,7 +371,7 @@ class A_to_B(BaseEnv):
         return tf.less_equal(tf.linalg.norm(q_car[:2] - p_goal, ord=2), self.goal_radius)                           # type: ignore[attr-defined]
 
     def arm_goal_reached(self, q_car: tf.Tensor, q_ball: tf.Tensor) -> tf.Tensor: # WARNING: hardcoded height
-        return tf.less_equal(tf.linalg.norm(tf.constant([q_car[0], q_car[1], 0.1]) - q_ball[:3]), self.goal_radius) # type: ignore[attr-defined]
+        return tf.less_equal(tf.linalg.norm(tf.constant([q_car[0], q_car[1], 0.1]) - q_ball[:3], dtype=tf.float32), self.goal_radius) # type: ignore[attr-defined]
 
     def grip(self) -> tf.Tensor:
         return tf.constant([0.02, -0.025, 0.02, -0.025], dtype=tf.float32)                                          # type: ignore[assignment] 
@@ -383,24 +386,45 @@ class A_to_B(BaseEnv):
         return tf.constant([
             velocity_x*tf.cos(orientation) + velocity_y*tf.sin(orientation), 
             -velocity_x*tf.sin(orientation) + velocity_y*tf.cos(orientation)                                        # type: ignore[operator]
-            ])
+            ], dtype=tf.float32)
 
     # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
     def car_velocity_modifier(self, theta: tf.Tensor) -> tf.Tensor:
         return 0.5 + 0.5*( tf.abs( ( tf.math.mod(theta, (pi/2.0)) ) - (pi/4.0) ) / (pi/4.0) )
+
+    @tf.function(jit_compile=True)
+    def vmapped_tf_random_split(self, PRNG_key: tf.Tensor, num: int) -> tf.Tensor:
+        keys: tf.Tensor = tf.vectorized_map(partial(tf.random.split, num=num), PRNG_key)                                       # type: ignore[attr-defined]
+        return [keys[:, i, :] for i in range(num)]
+        
+    
     # ------------------------------------- end subroutines -------------------------------------
     # -------------------------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
+    from os import environ
+    environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform" # want jax to deallocate GPU memory after use
+
+    from ray.tune import Tuner
+    from ray.air import RunConfig
     from ray.tune.registry import register_env
     from ray.rllib.algorithms.ppo import PPOConfig
     from ray.rllib.policy.policy import PolicySpec
+    from ray.rllib.core.rl_module.marl_module import MultiAgentRLModuleSpec
+    from ray.rllib.core.rl_module.rl_module import SingleAgentRLModuleSpec
     from functools import partial
-    from mujoco import mjx, MjModel, MjData, mj_name2id                                                             # type: ignore[import]
-    from mujoco.mjtObj import mjOBJ_SITE
+    from mujoco import mjx, MjModel, MjData, mj_name2id, mjtObj     # type: ignore[import]
     from gc import collect
     from math import pi
+    # from os import environ
+    from ray import init, shutdown
+
+    init(num_gpus=1)
+    # print(tf.config.list_physical_devices("GPU"))
+    # print(environ.get("CUDA_VISIBLE_DEVICES", "None"))
+    # print(get_gpu_ids())
+    # input()
     
 
     SCENE = "mujoco_models/scene.xml"
@@ -409,35 +433,41 @@ if __name__ == "__main__":
     data: MjData = MjData(model)
     mjx_model: mjx.Model = mjx.put_model(model)
     mjx_data: mjx.Data = mjx.put_data(model, data)
-    grip_site_id: int = mj_name2id(model, mjOBJ_SITE.value, "grip_site")
+    grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
+    num_envs = 4096
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_function = None,
-        car_controller  = None,
-        arm_controller  = None,
+        reward_function = lambda *args, **kwargs: tf.constant(0.0),
+        # car_controller  = None,
+        # arm_controller  = None,
         goal_radius     = 0.1,
         control_time    = 0.01,
         n_step_length   = 5,
-        num_envs        = 4096,
+        num_envs        = num_envs,
         prng_seed       = reproducibility_globals.PRNG_SEED
         )
 
-    register_env(A_to_B.__name__, partial(A_to_B, mjx_model, mjx_data, grip_site_id, options))
+    register_env(A_to_B.__name__, lambda *args, **kwargs: A_to_B(mjx_model, mjx_data, grip_site_id, options))
     collect()
 
     zeus_action_space = Box(
-            low=ZeusLimits().a_min.eval().tolist(), 
-            high=ZeusLimits().a_max.eval().tolist(), 
-            shape=(3, ), dtype=tf.float32)
+            low=ZeusLimits().a_min.numpy(), 
+            high=ZeusLimits().a_max.numpy(), 
+            shape=(3, ), dtype=float)
 
     panda_action_space = Box(
-            low=PandaLimits().tau_min.eval().tolist()+[-1.0], 
-            high=PandaLimits().tau_max.eval().tolist()+[1.0], 
-            shape=(8, ), dtype=tf.float32)
+            low=tf.concat([PandaLimits().tau_min, tf.constant([-1.0], dtype=tf.float32)], axis=0).numpy(), 
+            high=tf.concat([PandaLimits().tau_max, tf.constant([1.0], dtype=tf.float32)], axis=0).numpy(), 
+            shape=(8, ), dtype=float)
+
+    ngpus = 0.99
+    ncpus = 8
 
     config = (
             PPOConfig()
             .environment(A_to_B.__name__)
+            .experimental(_enable_new_api_stack=True)
+            .rollouts(num_rollout_workers=0, num_envs_per_worker=num_envs)
             .framework("tf2")
             .multi_agent(
                 policies = {
@@ -447,7 +477,14 @@ if __name__ == "__main__":
                 policy_mapping_fn = lambda agent_id, *args, **kwargs: agent_id,
                 policies_to_train = ["Zeus", "Panda"]
                 )
-            .resources(num_gpus=1)
+            .resources(
+                num_gpus=ngpus, 
+                num_gpus_per_worker=ngpus, 
+                num_learner_workers=0, 
+                num_gpus_per_learner_worker=ngpus, 
+                num_cpus_per_worker=ncpus,
+                num_cpus_for_local_worker=ncpus,
+                )
             .rl_module(
                 rl_module_spec=MultiAgentRLModuleSpec(
                     module_specs={
@@ -457,6 +494,19 @@ if __name__ == "__main__":
                     )
                 )
             )
-
-
     
+    stop = {
+            "training_iteration": 100,
+            "episode_reward_mean": 100,
+            "timesteps_total": 1000
+            }
+
+    results = Tuner(
+            "PPO",
+            param_space=config.to_dict(),
+            run_config=RunConfig(stop=stop, verbose=1)
+            ).fit()
+    
+    print(results)
+
+    shutdown()

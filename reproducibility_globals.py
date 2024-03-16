@@ -7,3 +7,4 @@ from typing import Literal
 
 
 PRNG_SEED: tuple[Literal[960], Literal[24]] = (960, 24) 
+# PRNG_SEED: int = 96024

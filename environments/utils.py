@@ -1,10 +1,14 @@
-from typing import Callable
 from mujoco.mjx import Model, Data, step, forward
-from jax import vmap
+from jax import vmap, Array
 from jax.lax import scan
 from jax.experimental.jax2tf import convert
-from jax import Array
+from jax.random import split, PRNGKey
+from jax.numpy import arange
 from tensorflow import Tensor
+from typing import Callable
+from functools import partial
+
+# TODO: make native_serialzation_platform adjustable
 
 
 def create_tensorflow_vmapped_mjx_functions(
@@ -54,3 +58,26 @@ def create_tensorflow_vmapped_mjx_functions(
     vmappes_get_site_xpos = convert(vmap(get_site_xpos, in_axes=(0, None)), native_serialization_platforms=["cuda"], with_gradient=False)
 
     return (vmapped_reset, vmapped_step, vmapped_n_step, vmappes_get_site_xpos) 
+
+
+def create_mjx_data_batch(mjx_data: Data, batch_size: int):
+    """ Returns: mjx.Data object with batched tf.Tensor fields with shape (batch_size, )."""
+    return convert(vmap(mjx_data.replace, axis_size=batch_size, out_axes=0), native_serialization_platforms=["cuda"], with_gradient=False)()
+
+# def create_batched_jax_random_split(batch_size: int) -> Callable[[int], Tensor]:
+#     """ Returns: a function that creates a PRNG key tf.Tensor with shape (batch_size, 2) using jax.random.split()."""
+#     def batched_jax_random_split(PRNG_seed: int) -> Tensor: 
+#         """ Returns: PRNG key tf.Tensor split into tf.Tensor with shape (batch_size, 2) using jax.random.split()."""
+#         return convert(partial(split, num=batch_size), native_serialization=False, enable_xla=True, with_gradient=False)(PRNGKey(PRNG_seed))
+
+#     return batched_jax_random_split
+
+# def create_vmapped_jax_random_split(num: int) -> Callable[[Tensor], Tensor]:
+#     def vmapped_jax_random_split(batched_PRNG_key: Tensor) -> list[Tensor, ...]:
+#         """ Returns: batched_PRNG_key tf.Tensor split into tf.Tensor with shape (num, batch_size) using jax.vmap() and jax.random.split()."""
+#         batched_PRNG_keys = convert(vmap(partial(split, num=num), in_axes=(0,)), native_serialization=False, enable_xla=True, with_gradient=False)(batched_PRNG_key)
+#         return [batched_PRNG_keys[:, i, :] for i in range(num)]
+    
+#     return vmapped_jax_random_split
+
+# jax_vmap = convert(vmap, native_serialization_platforms=["cuda"], with_gradient=False)

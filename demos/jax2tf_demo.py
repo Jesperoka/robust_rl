@@ -23,7 +23,8 @@ if __name__ == "__main__":
     rng = jax.random.PRNGKey(0)
     rng = jax.random.split(rng, 4096)
     
-    mjx_data_batch = jax.vmap(lambda rng: mjx_data.replace(qpos=jax.random.uniform(rng, (model.nq,))))(rng)
+    # mjx_data_batch = jax.vmap(lambda rng: mjx_data.replace(qpos=jax.random.uniform(rng, (model.nq,))))(rng)
+    mjx_data_batch = jax2tf.convert(jax.vmap(mjx_data.replace, axis_size=4096, out_axes=0), native_serialization_platforms=["cuda"], with_gradient=False)()
 
     ctrl = jax.numpy.zeros((4096, 14, ))
     for i in range(4096): 

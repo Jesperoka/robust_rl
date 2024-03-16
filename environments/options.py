@@ -26,5 +26,5 @@ class EnvironmentOptions:
     control_time:       float = 0.1     # s
     n_step_length:      int = 5
     num_envs:           int = 1
-    prng_seed:          tuple[int, int] = PRNG_SEED
+    prng_seed:          int = PRNG_SEED
     
