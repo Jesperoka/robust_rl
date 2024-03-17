@@ -2,9 +2,8 @@ from mujoco.mjx import Model, Data, step, forward
 from jax import vmap, Array
 from jax.lax import scan
 from jax.experimental.jax2tf import convert
-from jax.random import split, PRNGKey
-from jax.numpy import arange
-from tensorflow import Tensor
+from tensorflow import Tensor, vectorized_map, function as tf_function, unstack
+from tensorflow import random as tf_random
 from typing import Callable
 from functools import partial
 
@@ -81,3 +80,18 @@ def create_mjx_data_batch(mjx_data: Data, batch_size: int):
 #     return vmapped_jax_random_split
 
 # jax_vmap = convert(vmap, native_serialization_platforms=["cuda"], with_gradient=False)
+
+def method_takes_one_argument(undecorated_func):
+    """This method has been decorated to take all its arguments as a single tuple or other unpackable structure."""
+    def decorated_func(self, args):
+        return undecorated_func(self, *args)
+    return decorated_func 
+
+@tf_function(jit_compile=True)
+def vmapped_tf_random_split(PRNG_key: Tensor, num: int) -> tuple[Tensor, ...]:
+    """ Returns: PRNG_key tf.Tensor split into tuple of num tf.Tensor, each with shape (batch_size, 2) using tf.random.split()."""
+    keys: Tensor = vectorized_map(partial(tf_random.split, num=num), PRNG_key)                          # type: ignore[attr-defined]
+    assert keys.shape == (PRNG_key.shape[0], num, 2), f"keys.shape = {keys.shape} should be equal to (num, PRNG_key.shape[0], 2) = ({PRNG_key.shape[0]}, {num}, 2)."
+    return unstack(keys, axis=1)                                                                        # type: ignore[assignment]                                 
+
+
