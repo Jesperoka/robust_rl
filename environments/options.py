@@ -9,7 +9,7 @@ from tensorflow import Tensor as Array
 # ---------------------------------------
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from reproducibility_globals import PRNG_SEED 
 
@@ -19,12 +19,14 @@ def passthrough(x: Array) -> Array:
  # TODO: find some reasonable defaults
 @dataclass
 class EnvironmentOptions:
-    reward_function:    Callable[[Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]], Array, Array], Array]
+    # BUG: rllib expects reward function to return python int or float
+    reward_function:    Callable[[Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]], Array, Array], tuple[Array, Array]]
     car_controller:     Callable[[Array], Array] = passthrough 
     arm_controller:     Callable[[Array], Array] = passthrough
     goal_radius:        float = 0.1     # m
     control_time:       float = 0.1     # s
     n_step_length:      int = 5
     num_envs:           int = 1
-    prng_seed:          int = PRNG_SEED
+    prng_seed:          tuple[int, int] = PRNG_SEED
+    agent_ids:          tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
     

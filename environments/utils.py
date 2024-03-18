@@ -52,7 +52,7 @@ def create_tensorflow_vmapped_mjx_functions(
         return mjx_data.site_xpos[site_id]
 
     vmapped_reset = convert(vmap(reset, in_axes=(None, 0, 0, 0)), native_serialization_platforms=["cuda"], with_gradient=False)
-    vmapped_step = convert(vmap(step, in_axes=(None, 0, 0)), native_serialization_platforms=["cuda"], with_gradient=False)
+    vmapped_step = convert(vmap(step_with_ctrl, in_axes=(None, 0, 0)), native_serialization_platforms=["cuda"], with_gradient=False)
     vmapped_n_step = convert(vmap(n_step, in_axes=(None, 0, 0)), native_serialization_platforms=["cuda"], with_gradient=False)
     vmappes_get_site_xpos = convert(vmap(get_site_xpos, in_axes=(0, None)), native_serialization_platforms=["cuda"], with_gradient=False)
 
