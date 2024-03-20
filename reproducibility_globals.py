@@ -6,5 +6,4 @@ Globals for easy access to constants needed for reproducibility (such as PRNG se
 from typing import Literal
 
 
-PRNG_SEED: tuple[Literal[960], Literal[24]] = (960, 24) 
-# PRNG_SEED: int = 96024
+PRNG_SEED: Literal[96024] = 96024
