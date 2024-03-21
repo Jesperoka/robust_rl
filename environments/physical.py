@@ -1,3 +1,4 @@
+"""Physical constants for the environment and robots."""
 from jax import Array
 from jax.numpy import array
 

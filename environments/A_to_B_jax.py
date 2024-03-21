@@ -2,13 +2,13 @@ import reproducibility_globals
 import jax
 import chex
 
-from functools import partial
-from typing import Callable
+from functools import partial 
+from typing import Callable 
 from math import pi
 
 from jax import Array, numpy as jnp
 from chex import PRNGKey
-from mujoco.mjx import Model, Data
+from mujoco.mjx import Model, Data, forward as mjx_forward, step as mjx_step
 from environments.options import EnvironmentOptions 
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
 # from environments import utils
@@ -23,13 +23,14 @@ BIG_NUM: float = 100_000_000.0
 class Space:
     low: Array
     high: Array
-    @partial(jax.jit, static_argnums=(0,))
+    # @partial(jax.jit, static_argnums=(0,))
     def sample(self, key) -> Array: return jax.random.uniform(key, self.low.shape, self.low, self.high)
-    @partial(jax.jit, static_argnums=(0,))
+    # @partial(jax.jit, static_argnums=(0,))
     def contains(self, arr: Array) -> Array: return jnp.all((self.low <= arr) and (arr <= self.high))
 
 
 class A_to_B:
+    num_agents:            int = 2
     car_orientation_index: int = 2
     num_free_joints:       int = 1
 
@@ -62,8 +63,10 @@ class A_to_B:
         self.steps_per_ctrl:  int = options.steps_per_ctrl
         self.agent_ids:       tuple[str, str] = options.agent_ids
         self.prng_key:        PRNGKey = jax.random.PRNGKey(options.prng_seed)
-        self.obs_space:       Space = Space(options.obs_min, options.obs_max)
-        self.act_space:       Space = Space(options.act_min, options.act_max)
+        self.obs_space:       Space = Space(low=options.obs_min, high=options.obs_max)
+        self.act_space:       Space = Space(low=options.act_min, high=options.act_max)
+        self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # hardcoded for now
+        self.act_space_arm:   Space = Space(low=options.act_min[3:], high=options.act_max[3:]) # hardcoded for now
 
         self.car_limits: ZeusLimits = ZeusLimits()
         self.arm_limits: PandaLimits = PandaLimits()
@@ -88,18 +91,18 @@ class A_to_B:
     # --------------------------------------- begin reset --------------------------------------- 
     # -------------------------------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0,))
-    def reset(self, rng: Array, mjx_data: Data) -> tuple[Array, Data, Array]:
+    def reset(self, rng: Array, mjx_data: Data) -> tuple[Array, tuple[Data, Array]]:
         rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       
-        mjx_data = mjx.forward(mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
+        mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
 
         grip_site = mjx_data.site_xpos[self.grip_site_id]
         rng, q_ball, qd_ball, p_goal = self.reset_ball_and_goal(rng, grip_site)                                     
-        qpos = jnp.concatenate((qpos[:, 0 : -self.nq_ball], q_ball), axis=0)                                   
-        qvel = jnp.concatenate((qvel[:, 0 : -self.nv_ball], qd_ball), axis=0)                                  
-        mjx_data = mjx.forward(mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
+        qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
+        qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
+        mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
         observation = jnp.concatenate((qpos, qvel, p_goal), axis=0)                                            
     
-        return observation, mjx_data, p_goal 
+        return observation, (mjx_data, p_goal)
 
     def reset_car_arm_and_gripper(self, rng: Array) -> tuple[Array, Array, Array]:
         rng, rng_car, rng_arm, rng_gripper = jax.random.split(rng, 4)                                   
@@ -128,12 +131,12 @@ class A_to_B:
     # --------------------------------------- begin step ---------------------------------------- 
     # -------------------------------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0, 1))
-    def step(self, p_goal, action: Array, mjx_data: Data) -> tuple[Array, Array, Array, Array]:
+    def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
         ctrl = self.compute_controls(action, mjx_data)
         mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
         observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
 
-        return p_goal, observation, reward, done  
+        return (mjx_data, p_goal), observation, reward, done  
     
     def compute_controls(self, action: Array, mjx_data) -> Array:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
@@ -151,14 +154,14 @@ class A_to_B:
     def n_step(self, mjx_model: Model, mjx_data: Data, ctrl: Array) -> Data:
 
         def f(carry: Data, _):
-            carry = mjx.step(mjx_model, mjx_data.replace(ctrl=ctrl))
+            carry = mjx_step(mjx_model, mjx_data.replace(ctrl=ctrl))
             return carry, _ 
 
         final, _ = jax.lax.scan(f, mjx_data, None, length=self.steps_per_ctrl)
         return final
 
     
-    def evaluate_environment(self, observation, action) -> tuple[Array, Array, Array, Array]:
+    def evaluate_environment(self, observation, action) -> tuple[Array, tuple[Array, Array], Array, Array]:
         (q_car, q_arm, q_gripper, 
          q_ball, qd_car, qd_arm, 
          qd_gripper, qd_ball, p_goal) = self.decode_observation(observation)                     
@@ -177,7 +180,7 @@ class A_to_B:
 
         zeus_reward = zeus_reward + car_goal_reward - arm_goal_reward - car_outside_limits_reward     
         panda_reward = panda_reward + arm_goal_reward - car_goal_reward - arm_outside_limits_reward    
-        reward = jnp.stack((zeus_reward, panda_reward), axis=0)                                   
+        reward = (zeus_reward, panda_reward)
 
         done = jnp.logical_or(car_goal_reached, arm_goal_reached)
 
@@ -189,7 +192,7 @@ class A_to_B:
     # ------------------------------------ begin subroutines ------------------------------------
     # -------------------------------------------------------------------------------------------
     def get_car_orientation(self, mjx_data) -> Array:
-        return mjx_data.qpos[:, self.car_orientation_index]                                                    
+        return mjx_data.qpos[self.car_orientation_index]                                                    
     
     def observe(self, mjx_data, p_goal) -> Array:
         return jnp.concatenate([                                                                                        
@@ -284,9 +287,7 @@ class A_to_B:
         def release() -> Array: 
             return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)                                          
 
-        condition = float(action[0] >= 0.0)
-    
-        return condition*grip() + condition*release()                                    
+        return jax.lax.cond(action[0] > 0.0, grip, release)
 
     def car_local_polar_to_global_cartesian(self, orientation: Array, magnitude: Array, angle: Array, omega: Array) -> Array:
         # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
@@ -327,6 +328,10 @@ if __name__ == "__main__":
         steps_per_ctrl = 1,
         num_envs       = num_envs,
         prng_seed      = reproducibility_globals.PRNG_SEED         
+        # obs_min        = jnp.jnp.concatenate([ZeusLimits().q_min, PandaLimits().q_min, HandLimits().q_min, ZeusLimits().q_min[0:2]),
+        # obs_max        = ,
+        # act_min        = ,
+        # act_max        = 
         )
 
 
