@@ -22,7 +22,7 @@ from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
 
 
-    
+# TODO: make RNN length configurable
 class ScannedRNN(nn.Module):
     @functools.partial(
         nn.scan,
@@ -74,7 +74,7 @@ class ActorRNN(nn.Module):
         alpha = nn.softplus(alpha) + 1.0 # https://arxiv.org/pdf/2111.02202.pdf
         beta = nn.softplus(beta) + 1.0
 
-        pi = distrax.Beta(alpha, beta)
+        pi = distrax.Beta(alpha, beta) # TODO: figure out distrax.Joint and remove jnp.sum() calls
 
         # action_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)
         # pi = distrax.Categorical(logits=action_logits)
@@ -164,15 +164,15 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable[[Array], Runner
 
     def train(rng: Array) -> RunnerState:
         # TODO: I think I should use an iterable of agents, and iterate over it to perform the same computation for each agent instead of doubling all the code.
-
-        # INIT NETWORK
-        actor_network_1 = ActorRNN(env.act_space_car.low.shape[0])
-        actor_network_2 = ActorRNN(env.act_space_arm.low.shape[0])
-        critic_network_1 = CriticRNN()
-        critic_network_2 = CriticRNN()
         rng, rng_actor_1, rng_actor_2, rng_critic_1, rng_critic_2 = jax.random.split(rng, 5)
 
-        actor_init_x = (jnp.zeros((1, config.num_envs, env.obs_space.low.shape[0])), jnp.zeros((1, config.num_envs)))
+        # INIT NETWORK
+        actor_network_1 = ActorRNN(env.act_space_car.sample().shape[0])
+        actor_network_2 = ActorRNN(env.act_space_arm.sample().shape[0])
+        critic_network_1 = CriticRNN()
+        critic_network_2 = CriticRNN()
+
+        actor_init_x = (jnp.zeros((1, config.num_envs, env.obs_space.sample().shape[0])), jnp.zeros((1, config.num_envs)))
         actor_init_hstate = ScannedRNN.initialize_carry(config.num_envs, 128)
         actor_network_params_1 = actor_network_1.init(rng_actor_1, actor_init_hstate, actor_init_x)
         actor_network_params_2 = actor_network_2.init(rng_actor_2, actor_init_hstate, actor_init_x)
@@ -225,10 +225,10 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable[[Array], Runner
 
                 actor_hstate_1, pi_1 = actor_network_1.apply(train_states[0].params, hstates[0], actor_in)
                 actor_hstate_2, pi_2 = actor_network_2.apply(train_states[1].params, hstates[1], actor_in)
-                action_1 = pi_1.sample(seed=rng_act_1).squeeze()    # type: ignore[attr-defined]
-                action_2 = pi_2.sample(seed=rng_act_2).squeeze()    # type: ignore[attr-defined]
-                log_prob_1 = pi_1.log_prob(action_1).squeeze()      # type: ignore[attr-defined]
-                log_prob_2 = pi_2.log_prob(action_2).squeeze()      # type: ignore[attr-defined]
+                action_1 = pi_1.sample(seed=rng_act_1).squeeze()            # type: ignore[attr-defined]
+                action_2 = pi_2.sample(seed=rng_act_2).squeeze()            # type: ignore[attr-defined]
+                log_prob_1 = jnp.sum(pi_1.log_prob(action_1), axis=-1)      # type: ignore[attr-defined] # doing jnp.sum() assumes independent actions
+                log_prob_2 = jnp.sum(pi_2.log_prob(action_2), axis=-1)      # type: ignore[attr-defined] # doing jnp.sum() assumes independent actions
 
                 env_act = jnp.concatenate([action_1, action_2], axis=-1)
 
@@ -246,7 +246,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable[[Array], Runner
                 transition = Transition(
                     done,
                     (action_1, action_2),
-                    (value_1, value_2), # type: ignore[assignment]
+                    (value_1.squeeze(), value_2.squeeze()), # type: ignore[attr-defined]
                     rewards,
                     (log_prob_1.squeeze(), log_prob_2.squeeze()),
                     obs_batch,
@@ -277,7 +277,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable[[Array], Runner
                     delta = reward + config.gamma * next_value * (1 - done) - value
                     gae = delta + config.gamma * config.gae_lambda * (1 - done) * gae
 
-                    return (gae.squeeze(), value.squeeze()), gae
+                    return (gae, value), gae # BUG: shouldn't need to squeeze()
 
                 _, advantages = jax.lax.scan(_get_advantages, (jnp.zeros_like(last_val), last_val), traj_batch, reverse=True, unroll=16)
 
@@ -295,73 +295,53 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable[[Array], Runner
                     def _actor_loss_fn(actor_params, init_hstate: Array, traj_batch: Transition, gae: Array, actor_network: ActorRNN, idx: int):
                         # RERUN NETWORK
                         _, pi = actor_network.apply(actor_params, init_hstate.transpose(), (traj_batch.obs, traj_batch.done))
-                        log_prob = pi.log_prob(traj_batch.actions[idx]) # type: ignore[attr-defined]
+                        log_prob = jnp.sum(pi.log_prob(traj_batch.actions[idx]), axis=-1)   # type: ignore[attr-defined] # doing jnp.sum() assumes independent actions
 
                         # CALCULATE ACTOR LOSS
                         ratio = jnp.exp(log_prob - traj_batch.log_probs[idx])
-                        gae = jnp.expand_dims((gae - gae.mean()) / (gae.std() + 1e-8), -1)
+                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
                         loss_actor1 = ratio * gae
                         loss_actor2 = jnp.clip(ratio, 1.0 - config.clip_eps, 1.0 + config.clip_eps) * gae
                         loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
-                        done = jnp.expand_dims(traj_batch.done, -1)
-                        loss_actor = loss_actor.mean(where=(1 - done))
-                        entropy = pi.entropy().mean(where=(1 - done)) # type: ignore[attr-defined]
+                        loss_actor = loss_actor.mean(where=(1 - traj_batch.done))
+                        entropy = jnp.sum(pi.entropy(), axis=-1).mean(where=(1 - traj_batch.done)) # type: ignore[attr-defined] # doing jnp.sum() assumes independent actions
                         actor_loss = loss_actor - config.ent_coef * entropy
 
                         return actor_loss, (loss_actor, entropy)
                     
-                    def critic_loss_fn(critic_params_1, critic_params_2,
-                                       init_hstate_1, init_hstate_2, 
-                                       traj_batch, 
-                                       targets_1, targets_2, 
-                                       critic_network_1: CriticRNN, critic_network_2: CriticRNN
-                                       ):
+                    def _critic_loss_fn(critic_params, init_hstate, traj_batch, targets, critic_network: CriticRNN, idx: int):
+                        # RERUN NETWORK
+                        critic_in = (jnp.concatenate([traj_batch.obs, traj_batch.actions[1-idx]], axis=-1), traj_batch.done) # WARNING: only works with exactly two agents
+                        _, value = critic_network.apply(critic_params, init_hstate.transpose(), critic_in) 
+                        
+                        # CALCULATE VALUE LOSS
+                        value_pred_clipped = traj_batch.values[idx] + (value - traj_batch.values[idx]).clip(-config.clip_eps, config.clip_eps)
+                        value_losses = jnp.square(value - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean(where=(1 - traj_batch.done))
+                        critic_loss = config.vf_coef * value_loss
 
-                        def _critic_loss_fn(critic_params, init_hstate, traj_batch, targets, critic_network: CriticRNN, idx: int):
-                            # RERUN NETWORK
-                            pdb.set_trace()
-                            # BUG: rethink shapes of traj_batch.values and critic_nework.apply -> values
-                            critic_in = (jnp.concatenate([traj_batch.obs, traj_batch.actions[1-idx]], axis=-1), traj_batch.done) # WARNING: only works with exactly two agents
-                            _, value = critic_network.apply(critic_params, init_hstate.transpose(), critic_in) 
-                            
-                            # CALCULATE VALUE LOSS
-                            value_pred_clipped = traj_batch.values[idx] + (value - traj_batch.values[idx]).clip(-config.clip_eps, config.clip_eps)
-                            value_losses = jnp.square(value - targets)
-                            value_losses_clipped = jnp.square(value_pred_clipped - targets)
-                            value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean(where=(1 - traj_batch.done))
-                            critic_loss = config.vf_coef * value_loss
-
-                            return critic_loss, value_loss
-
-                        critic_loss_1, value_loss_1 = _critic_loss_fn(critic_params_1, init_hstate_1, traj_batch, targets_1, critic_network_1, 0)
-                        critic_loss_2, value_loss_2 = _critic_loss_fn(critic_params_2, init_hstate_2, traj_batch, targets_2, critic_network_2, 1)
-
-                        loss = critic_loss_1 - critic_loss_2 # NOTE: optimize to make the opponent worse
-
-                        return loss, (value_loss_1, value_loss_2)
+                        return critic_loss, value_loss
 
                     actor_grad_fn = jax.value_and_grad(_actor_loss_fn, has_aux=True)
                     actor_loss_1, actor_grads_1 = actor_grad_fn(actor_train_state_1.params, actor_init_hstate_1, traj_batch, advantages_1, actor_network_1, 0)
                     actor_loss_2, actor_grads_2 = actor_grad_fn(actor_train_state_2.params, actor_init_hstate_2, traj_batch, advantages_2, actor_network_2, 1)
-
-                    critic_grad_fn = jax.value_and_grad(critic_loss_fn, has_aux=True)
-                    critic_loss, critic_grads = critic_grad_fn(critic_train_state_1.params, critic_train_state_2.params,
-                                                               critic_init_hstate_1, critic_init_hstate_2,
-                                                               traj_batch, 
-                                                               targets_1, targets_2,
-                                                               critic_network_1, critic_network_2)
-                    
                     actor_train_state_1 = actor_train_state_1.apply_gradients(grads=actor_grads_1)
                     actor_train_state_2 = actor_train_state_2.apply_gradients(grads=actor_grads_2)
-                    critic_train_state_1 = critic_train_state_1.apply_gradients(grads=critic_grads)
-                    critic_train_state_2 = critic_train_state_2.apply_gradients(grads=-critic_grads) # NOTE: the minus
+
+                    critic_grad_fn = jax.value_and_grad(_critic_loss_fn, has_aux=True)
+                    critic_loss_1, critic_grads_1 = critic_grad_fn(critic_train_state_1.params, critic_init_hstate_1, traj_batch, advantages_1, critic_network_1, 0)
+                    critic_loss_2, critic_grads_2 = critic_grad_fn(critic_train_state_2.params, critic_init_hstate_2, traj_batch, advantages_2, critic_network_2, 1)
+                    critic_train_state_1 = critic_train_state_1.apply_gradients(grads=critic_grads_1)
+                    critic_train_state_2 = critic_train_state_2.apply_gradients(grads=critic_grads_2)
                     
-                    total_loss = actor_loss_1[0] + actor_loss_2[0] + critic_loss[0]
+                    total_loss = actor_loss_1[0] + actor_loss_2[0] + critic_loss_1[0] + critic_loss_2[0]
                     loss_info = {
                         "total_loss": total_loss,
                         "actor_loss_1": actor_loss_1[0],
                         "actor_loss_2": actor_loss_2[0],
-                        "critic_loss": critic_loss[0],
+                        "critic_loss_1": critic_loss_1[0],
+                        "critic_loss_2": critic_loss_2[0],
                         "entropy_1": actor_loss_1[1][1],
                         "entropy_2": actor_loss_2[1][1],
                     }
@@ -505,10 +485,12 @@ if __name__=="__main__":
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
     print("compiling train_fn()...")
-    train_fn = jax.jit(make_train(config, env)).lower(rng).compile()
+    # train_fn = jax.jit(make_train(config, env)).lower(rng).compile()
+    train_fn = make_train(config, env)
     print("...done compiling.")
 
     print("running train_fn()...")
+    # pdb.set_trace()
     out = train_fn(rng)
     print("...done running.")
 

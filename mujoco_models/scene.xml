@@ -45,8 +45,8 @@
     </visual>
 
     <asset>
-        <texture name="red_checker" type="cube" builtin="checker" rgb1="0.5 0.1 0.1"
-            rgb2="0.3 0.1 0.1" markrgb="0.8 0.8 0.8" width="100" height="100" />
+        <texture name="red_checker" type="cube" builtin="checker" rgb1="0.9 0.1 0.1"
+            rgb2="0.1 0.1 0.9" markrgb="0.8 0.8 0.8" width="100" height="100" />
         <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
             height="3072" />
         <texture name="groundplane_texture" type="2d" builtin="checker" mark="edge"
@@ -59,7 +59,7 @@
             rgba="0.6 0.6 0.6 1" />
         <material name="black_plastic" rgba="0.2 0.2 0.2 1" reflectance="0.3" specular="0.3" />
         <material name="ball_material" texture="red_checker" texuniform="true" texrepeat="10 10"
-            rgba="1 1 1 0.2" />
+            rgba="1 1 1 0.8" />
 
         <texture name="zeus_car_texture" file="meshes/zeus_car_meshes/3DModel_LowPoly.png" type="2d" />
         <material name="zeus_car_material" texture="zeus_car_texture" />

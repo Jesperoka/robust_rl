@@ -17,15 +17,14 @@ import pdb
 
 
 BIG_NUM: float = 100_000_000.0
+DEFAULT_RNG: PRNGKey = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
 
 @chex.dataclass
 class Space:
     low: Array
     high: Array
-    # @partial(jax.jit, static_argnums=(0,))
-    def sample(self, key) -> Array: return jax.random.uniform(key, self.low.shape, self.low, self.high)
-    # @partial(jax.jit, static_argnums=(0,))
+    def sample(self, key: PRNGKey = DEFAULT_RNG) -> Array: return jax.random.uniform(key, self.low.shape, minval=self.low, maxval=self.high)
     def contains(self, arr: Array) -> Array: return jnp.all((self.low <= arr) and (arr <= self.high))
 
 
@@ -50,7 +49,6 @@ class A_to_B:
     nu_gripper: int = 4
 
     def __init__(self, mjx_model: Model, mjx_data: Data, grip_site_id: int, options: EnvironmentOptions) -> None:
-
         self.mjx_model: Model = mjx_model
         self.mjx_data: Data = mjx_data
         self.grip_site_id: int = grip_site_id
@@ -130,7 +128,8 @@ class A_to_B:
 
     # --------------------------------------- begin step ---------------------------------------- 
     # -------------------------------------------------------------------------------------------
-    @partial(jax.jit, static_argnums=(0, 1))
+    # BUG: why does step function diverge or something?
+    # @partial(jax.jit, static_argnums=(0,))
     def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
         ctrl = self.compute_controls(action, mjx_data)
         mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
@@ -308,10 +307,16 @@ class A_to_B:
 
 
 if __name__ == "__main__":
-    from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx # type: ignore[import]
+    from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx, MjvCamera, Renderer # type: ignore[import]
+    import matplotlib.pyplot as plt
+
 
     SCENE = "mujoco_models/scene.xml"
+    OUTPUT_DIR = "demos/assets/"
+    OUTPUT_FILE = "temp.mp4"
+    COMPILATION_CACHE_DIR = "./compiled_functions"
 
+    jax.experimental.compilation_cache.compilation_cache.set_cache_dir(COMPILATION_CACHE_DIR)
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -334,4 +339,41 @@ if __name__ == "__main__":
         # act_max        = 
         )
 
+    env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
+    rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
+
+    pdb.set_trace()
+
+    renderer = Renderer(model, height=1080, width=1920)
+    cam = MjvCamera()
+    cam.elevation = -35
+    cam.azimuth = 110
+    cam.lookat = jax.numpy.array([env.playing_area.x_center, env.playing_area.y_center, 0.3])
+    cam.distance = 3.5
+
+    frames = []
+    for i in range(10):
+        rng, rng_r, rng_c, rng_a = jax.random.split(rng, 4)
+        obs, (mjx_data, p_goal) = env.reset(rng_r, mjx_data)
+
+        data = mjx.get_data(model, mjx_data)
+        renderer.update_scene(data, camera=cam)
+        frames.append(renderer.render())
+        plt.imsave(OUTPUT_DIR + "A_to_B_demo_frame_before"+str(i)+".png", frames[-1])
+        
+        # action = jnp.concatenate([env.act_space_car.sample(rng_c), env.act_space_arm.sample(rng_a)], axis=0)
+        action = jnp.zeros(11)
+
+        for j in range(10):
+            (mjx_data, p_goal), obs, rewards, done = env.step(mjx_data, p_goal, action)
+            data = mjx.get_data(model, mjx_data)
+            renderer.update_scene(data, camera=cam)
+            frames.append(renderer.render())
+            # plt.imshow(frames[-1])
+            # plt.show()
+            # input("hold")
+
+        plt.imsave(OUTPUT_DIR + "A_to_B_demo_frame_after"+str(i)+".png", frames[-1])
+
+    renderer.close()
 
