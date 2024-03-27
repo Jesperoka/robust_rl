@@ -128,16 +128,15 @@ class A_to_B:
 
     # --------------------------------------- begin step ---------------------------------------- 
     # -------------------------------------------------------------------------------------------
-    # BUG: why does step function diverge or something?
-    # @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.jit, static_argnums=(0,))
     def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
-        ctrl = self.compute_controls(action, mjx_data)
+        ctrl = self.compute_controls(mjx_data, action)
         mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
         observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
 
         return (mjx_data, p_goal), observation, reward, done  
     
-    def compute_controls(self, action: Array, mjx_data) -> Array:
+    def compute_controls(self, mjx_data: Data, action: Array) -> Array:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)                                     
         car_orientation = self.get_car_orientation(mjx_data)
@@ -282,7 +281,7 @@ class A_to_B:
 
     def gripper_ctrl(self, action: Array) -> Array:
         def grip() -> Array:
-            return jnp.array([0.02, -0.025, 0.02, -0.025], dtype=jnp.float32)                                      
+            return jnp.array([0.02, -0.005, 0.02, -0.005], dtype=jnp.float32)                                      
         def release() -> Array: 
             return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)                                          
 
@@ -342,8 +341,6 @@ if __name__ == "__main__":
     env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
-    pdb.set_trace()
-
     renderer = Renderer(model, height=1080, width=1920)
     cam = MjvCamera()
     cam.elevation = -35
@@ -352,7 +349,7 @@ if __name__ == "__main__":
     cam.distance = 3.5
 
     frames = []
-    for i in range(10):
+    for i in range(3):
         rng, rng_r, rng_c, rng_a = jax.random.split(rng, 4)
         obs, (mjx_data, p_goal) = env.reset(rng_r, mjx_data)
 
@@ -362,9 +359,9 @@ if __name__ == "__main__":
         plt.imsave(OUTPUT_DIR + "A_to_B_demo_frame_before"+str(i)+".png", frames[-1])
         
         # action = jnp.concatenate([env.act_space_car.sample(rng_c), env.act_space_arm.sample(rng_a)], axis=0)
-        action = jnp.zeros(11)
+        action = jnp.ones(11)
 
-        for j in range(10):
+        for j in range(100):
             (mjx_data, p_goal), obs, rewards, done = env.step(mjx_data, p_goal, action)
             data = mjx.get_data(model, mjx_data)
             renderer.update_scene(data, camera=cam)

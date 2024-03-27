@@ -21,8 +21,8 @@ class EnvironmentOptions:
     agent_ids:      tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
     obs_min:        Array = field(default_factory=lambda: float("-inf")*ones(39, dtype=float32))
     obs_max:        Array = field(default_factory=lambda: float("inf")*ones(39, dtype=float32))
-    act_min:        Array = field(default_factory=lambda: float("-inf")*ones(11, dtype=float32))
-    act_max:        Array = field(default_factory=lambda: float("inf")*ones(11, dtype=float32))
+    act_min:        Array = field(default_factory=lambda: -ones(11, dtype=float32))
+    act_max:        Array = field(default_factory=lambda: ones(11, dtype=float32))
 
     
     
