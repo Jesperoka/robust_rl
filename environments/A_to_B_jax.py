@@ -25,7 +25,7 @@ class Space:
     low: Array
     high: Array
     def sample(self, key: PRNGKey = DEFAULT_RNG) -> Array: return jax.random.uniform(key, self.low.shape, minval=self.low, maxval=self.high)
-    def contains(self, arr: Array) -> Array: return jnp.all((self.low <= arr) and (arr <= self.high))
+    def contains(self, arr: Array) -> Array: return jnp.all((self.low <= arr) & (arr <= self.high))
 
 
 class A_to_B:
@@ -65,6 +65,7 @@ class A_to_B:
         self.act_space:       Space = Space(low=options.act_min, high=options.act_max)
         self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # hardcoded for now
         self.act_space_arm:   Space = Space(low=options.act_min[3:], high=options.act_max[3:]) # hardcoded for now
+        self.act_spaces:      tuple[Space, Space] = (self.act_space_car, self.act_space_arm)
 
         self.car_limits: ZeusLimits = ZeusLimits()
         self.arm_limits: PandaLimits = PandaLimits()
@@ -139,6 +140,11 @@ class A_to_B:
     def compute_controls(self, mjx_data: Data, action: Array) -> Array:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)                                     
+
+        # pdb.set_trace()
+        # assert self.act_space_car.contains(a_car), f"{a_car} not in {self.act_space_car}"
+        # assert self.act_space_arm.contains(jnp.concatenate([a_arm, a_gripper], axis=0)), f"{jnp.concatenate([a_arm, a_gripper], axis=0)} not in {self.act_space_arm}"
+
         car_orientation = self.get_car_orientation(mjx_data)
         car_local_ctrl = self.car_ctrl(a_car)                                                                                   
         ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
@@ -349,7 +355,7 @@ if __name__ == "__main__":
     cam.distance = 3.5
 
     frames = []
-    for i in range(3):
+    for i in range(1):
         rng, rng_r, rng_c, rng_a = jax.random.split(rng, 4)
         obs, (mjx_data, p_goal) = env.reset(rng_r, mjx_data)
 
@@ -361,14 +367,13 @@ if __name__ == "__main__":
         # action = jnp.concatenate([env.act_space_car.sample(rng_c), env.act_space_arm.sample(rng_a)], axis=0)
         action = jnp.ones(11)
 
-        for j in range(100):
+        for j in range(200):
+            if j > 100:
+                action = action.at[-1].set(-1)
             (mjx_data, p_goal), obs, rewards, done = env.step(mjx_data, p_goal, action)
             data = mjx.get_data(model, mjx_data)
             renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())
-            # plt.imshow(frames[-1])
-            # plt.show()
-            # input("hold")
 
         plt.imsave(OUTPUT_DIR + "A_to_B_demo_frame_after"+str(i)+".png", frames[-1])
 

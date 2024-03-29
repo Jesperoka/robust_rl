@@ -5,7 +5,7 @@ from chex import dataclass
 @dataclass
 class AlgorithmConfig:
     num_envs:        int = 128 
-    num_steps:       int = 128 # must be 128
+    num_steps:       int = 128 # must be 128 # TODO: make configurable
     num_actors:      int = num_envs 
     total_timesteps: int = 2_000_000
     num_updates:     int = total_timesteps // num_steps // num_envs 
@@ -15,7 +15,7 @@ class AlgorithmConfig:
     update_epochs:   int = 4
     gamma:           float = 0.99
     gae_lambda:      float = 0.95
-    clip_eps:        float = 0.2
+    clip_eps:        float = 0.25
     scale_clip_eps:  bool = False 
     ent_coef:        float = 0.01
     vf_coef:         float = 0.5
