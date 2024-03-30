@@ -3,7 +3,7 @@ from jax.lax import scan
 from jax.numpy import sum, where, newaxis, mean, zeros_like, sqrt, squeeze
 from jax.random import PRNGKey
 from distrax import Beta, Transformed, ScalarAffine, Distribution
-from typing import Any, Optional, NamedTuple
+from typing import Any, Optional, NamedTuple, Never
 from flax.linen import compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
@@ -105,7 +105,7 @@ class ActorRNN(Module):
 
         var = welford_S / (running_count - 1)
 
-        return standardize(obs, mean_obs, sqrt(var)), RunningStats(mean_obs=mean_obs, welford_S=welford_S, running_count=running_count)
+        return standardize(x=obs, mean=mean_obs, variance=var), RunningStats(mean_obs=mean_obs, welford_S=welford_S, running_count=running_count)
 
 
 class CriticRNN(Module):
