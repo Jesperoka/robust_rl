@@ -90,7 +90,7 @@ class A_to_B:
     # --------------------------------------- begin reset --------------------------------------- 
     # -------------------------------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0,))
-    def reset(self, rng: Array, mjx_data: Data) -> tuple[Array, tuple[Data, Array]]:
+    def reset(self, rng: Array, mjx_data: Data) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
         rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
 
@@ -99,9 +99,9 @@ class A_to_B:
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
-        observation = jnp.concatenate((qpos, qvel, p_goal), axis=0)                                            
+        observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
     
-        return observation, (mjx_data, p_goal)
+        return (mjx_data, p_goal), observation, reward, done
 
     def reset_car_arm_and_gripper(self, rng: Array) -> tuple[Array, Array, Array]:
         rng, rng_car, rng_arm, rng_gripper = jax.random.split(rng, 4)                                   
@@ -111,11 +111,9 @@ class A_to_B:
         q_ball_placeholder = jnp.zeros((self.nq_ball, )) 
         qd_ball_placeholder = jnp.zeros((self.nv_ball, ))
 
-        return (
-                rng, 
+        return (rng,
                 jnp.concatenate((q_car, q_arm, q_gripper, q_ball_placeholder), axis=0), 
-                jnp.concatenate((qd_car, qd_arm, qd_gripper, qd_ball_placeholder), axis=0)
-                )                                                                                                   
+                jnp.concatenate((qd_car, qd_arm, qd_gripper, qd_ball_placeholder), axis=0))                                                                                                   
 
     def reset_ball_and_goal(self, rng: Array, grip_site: Array) -> tuple[Array, Array, Array, Array]:
         rng, rng_ball, rng_goal = jax.random.split(rng, 3)                                              
@@ -165,7 +163,7 @@ class A_to_B:
         return final
 
     
-    def evaluate_environment(self, observation, action) -> tuple[Array, tuple[Array, Array], Array, Array]:
+    def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array]:
         (q_car, q_arm, q_gripper, 
          q_ball, qd_car, qd_arm, 
          qd_gripper, qd_ball, p_goal) = self.decode_observation(observation)                     
