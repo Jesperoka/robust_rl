@@ -541,6 +541,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable:
     
 if __name__=="__main__":
     import reproducibility_globals
+    from flax.training import train_state, checkpoints
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx # type: ignore[import]
     from environments.A_to_B_jax import A_to_B
     from environments.options import EnvironmentOptions
@@ -603,7 +604,7 @@ if __name__=="__main__":
         lr              = 2e-3,
         num_envs        = num_envs,
         num_env_steps   = 128,
-        total_timesteps = 16*2_097_152,
+        total_timesteps = 128*2_097_152,
         update_epochs   = 4,
         num_minibatches = num_envs // 256,
         gamma           = 0.99,
@@ -638,6 +639,17 @@ if __name__=="__main__":
     out = train_fn(rng)
     print("\n\n...done running.\n\n")
 
-    pprint(out[0].actors)
-    pprint(out[0].critics)
-    pprint(out[1])
+    env_final, step = out
+    pprint(env_final.actors)
+    pprint(env_final.critics)
+    pprint(step)
+
+    CKPT_DIR = 'trained_policies'
+    checkpoints.save_checkpoint(ckpt_dir=CKPT_DIR, target=env_final.actors.train_states[0], step=step)
+    checkpoints.save_checkpoint(ckpt_dir=CKPT_DIR, target=env_final.actors.train_states[1], step=step)
+    checkpoints.save_checkpoint(ckpt_dir=CKPT_DIR, target=env_final.critics.train_states[0], step=step)
+    checkpoints.save_checkpoint(ckpt_dir=CKPT_DIR, target=env_final.critics.train_states[1], step=step)
+    
+    restored_state = checkpoints.restore_checkpoint(ckpt_dir=CKPT_DIR, target=env_final.actors.train_states[0])
+    assert jax.tree_util.tree_all(jax.tree_multimap(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_state.params))
+
