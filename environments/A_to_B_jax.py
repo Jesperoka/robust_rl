@@ -139,10 +139,6 @@ class A_to_B:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)                                     
 
-        # pdb.set_trace()
-        # assert self.act_space_car.contains(a_car), f"{a_car} not in {self.act_space_car}"
-        # assert self.act_space_arm.contains(jnp.concatenate([a_arm, a_gripper], axis=0)), f"{jnp.concatenate([a_arm, a_gripper], axis=0)} not in {self.act_space_arm}"
-
         car_orientation = self.get_car_orientation(mjx_data)
         car_local_ctrl = self.car_ctrl(a_car)                                                                                   
         ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
@@ -171,6 +167,11 @@ class A_to_B:
         car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max)                          
         arm_outside_limits = self.outside_limits(q_arm, minval=self.arm_limits.q_min, maxval=self.arm_limits.q_max)
 
+        # TODO: temporary, make self.ball_limits
+        ball_outside_limits_x = self.outside_limits(q_ball[0:1], minval=self.car_limits.x_min, maxval=self.car_limits.x_max)        # type: ignore[assignment]
+        ball_outside_limits_y = self.outside_limits(q_ball[1:2], minval=self.car_limits.y_min, maxval=self.car_limits.y_max)        # type: ignore[assignment]
+        ball_outside_limits_z = self.outside_limits(q_ball[2:3], minval=self.playing_area.z_min, maxval=self.playing_area.z_max)    # type: ignore[assignment]
+
         car_goal_reached = self.car_goal_reached(q_car, p_goal)
         arm_goal_reached = self.arm_goal_reached(q_car, q_ball)
 
@@ -185,6 +186,7 @@ class A_to_B:
         reward = (zeus_reward, panda_reward)
 
         done = jnp.logical_or(car_goal_reached, arm_goal_reached)
+        done = jnp.logical_or(done, jnp.logical_or(ball_outside_limits_x, jnp.logical_or(ball_outside_limits_y, ball_outside_limits_z)))
 
         return observation, reward, done, p_goal
     # ---------------------------------------- end step ----------------------------------------- 

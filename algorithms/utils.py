@@ -1,6 +1,6 @@
 from jax import Array
 from jax.lax import scan, cond
-from jax.numpy import sum, where, newaxis, mean, zeros_like, sqrt, squeeze
+from jax.numpy import sum, where, newaxis, mean, zeros_like, sqrt, squeeze, clip
 from jax.random import PRNGKey
 from distrax import Beta, Transformed, ScalarAffine, Distribution
 from flax.linen import compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
@@ -8,6 +8,8 @@ from flax.linen.initializers import constant, orthogonal
 from functools import partial
 from typing import Any, Optional, NamedTuple, Never
 from jax.tree_util import register_static
+
+import pdb
 
 
 class RunningStats(NamedTuple):
@@ -39,15 +41,15 @@ def normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, Runnin
     def first_update(args):
         stacked_obs, obs, *_ = args 
         mean_obs = mean(stacked_obs, axis=0)
-        return mean_obs, zeros_like(mean_obs), 1
+        return mean_obs, zeros_like(mean_obs), 1, 1
 
     def update(args):
         stacked_obs, _, mean_obs, welford_S, running_count = args
-        return batch_welford_update((mean_obs, welford_S, running_count), stacked_obs)
+        return *batch_welford_update((mean_obs, welford_S, running_count), stacked_obs), 0
 
-    mean_obs, welford_S, running_count = cond(running_count == 0, first_update, update, (stacked_obs, obs, mean_obs, welford_S, running_count))
+    mean_obs, welford_S, running_count, first = cond(running_count == 0, first_update, update, (stacked_obs, obs, mean_obs, welford_S, running_count))
 
-    var = welford_S / (running_count - 1)
+    var = welford_S / (running_count - 1 + first)
 
     return standardize(x=obs, mean=mean_obs, variance=var), RunningStats(mean_obs, welford_S, running_count, skip_update)
 
@@ -65,7 +67,6 @@ class JointScaledBeta(Transformed):
 
 
 # Flax module for a GRU cell that can be scanned and with static initializer method
-# @dataclass
 class ScannedRNN(Module):
     @partial(nn_scan, variable_broadcast="params", in_axes=0, out_axes=0, split_rngs={"params": False})
     @compact
@@ -82,15 +83,13 @@ class ScannedRNN(Module):
         return GRUCell(features=hidden_size).initialize_carry(PRNGKey(0), (batch_size, hidden_size)) # Use a dummy key since the default state init fn is just zeros.
 
 
-# Flax module for an actor network with a GRU cell and a Beta distribution output
-# @dataclass
 class ActorRNN(Module):
     action_dim: int
 
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Distribution, Any]: # type: ignore[override]
         obs, dones = x
-        obs, statistics = cond(statistics.skip_update, normalize_input, lambda o, s: (o, s), obs, statistics)
+        obs, statistics = cond(statistics.skip_update, lambda o, s: (o, s), normalize_input, obs, statistics)
 
         embedding = Dense(
             128, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0)
@@ -100,13 +99,16 @@ class ActorRNN(Module):
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
 
-        actor_mean = Dense(128, kernel_init=orthogonal(2.0), bias_init=constant(0.0))(embedding)
+        actor_mean = Dense(128, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(embedding)
         actor_mean = relu(actor_mean)
 
         # https://arxiv.org/pdf/2111.02202.pdf
-        alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)) + 1.0
-        beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)) + 1.0
-        # pi = distrax.Transformed(distrax.Beta(alpha, beta), distrax.ScalarAffine(-1.0, 2.0))
+        alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
+        beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
+
+        alpha = clip(alpha, 1.0, 100)
+        beta = clip(alpha, 1.0, 100)
+
         pi = JointScaledBeta(alpha, beta, -1.0, 2.0)
 
         # TODO: implement .entropy() function using estimated entropy of squashed Gaussian
@@ -118,7 +120,7 @@ class ActorRNN(Module):
 
         return hidden, pi, statistics 
 
-# @dataclass
+# TODO: add input normalization to critic
 class CriticRNN(Module):
     
     @compact
@@ -130,11 +132,11 @@ class CriticRNN(Module):
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
         
-        critic = Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
+        critic = Dense(128, kernel_init=orthogonal(2.0), bias_init=constant(0.0))(
             embedding
         )
         critic = relu(critic)
-        critic = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+        critic = Dense(1, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(
             critic
         )
         

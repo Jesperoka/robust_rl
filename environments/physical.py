@@ -12,6 +12,8 @@ class PlayingArea:
     y_center:       float = 0.0 # m
     half_x_length:  float = 1.0 # m
     half_y_length:  float = 1.0 # m
+    z_min:          float = 0.0 # m
+    z_max:          float = 3.5 # m
 
 @dataclass(frozen=True)
 class PandaLimits:
@@ -121,7 +123,6 @@ class PandaLimits:
         1000.0,
         1000.0
     ], dtype=float))
-
 
 
 @dataclass(frozen=True)
