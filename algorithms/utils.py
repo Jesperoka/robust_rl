@@ -153,6 +153,7 @@ class CriticRNN(Module):
         return hidden, squeeze(critic, axis=-1)
 
 # Allows passing module as carry to jax.lax.scan in training loop
+# BUG: I need to check if the actors and critics can be static (PyTree with no leaves) otherwise I might need to capture with partial() in make_train()
 register_static(ScannedRNN)
 register_static(ActorRNN)
 register_static(CriticRNN)
