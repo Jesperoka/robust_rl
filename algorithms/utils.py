@@ -1,12 +1,12 @@
-from jax import Array
+from jax import Array, vmap
 from jax.lax import scan, cond
-from jax.numpy import sum, where, newaxis, mean, zeros_like, sqrt, squeeze, clip
+from jax.numpy import sum, where, newaxis, mean, zeros_like, ones_like, sqrt, squeeze, clip, logical_and
 from jax.random import PRNGKey
 from distrax import Beta, Transformed, ScalarAffine, Distribution
 from flax.linen import compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
-from typing import Any, Optional, NamedTuple, Never
+from typing import Any, Optional, NamedTuple
 from jax.tree_util import register_static
 
 import pdb
@@ -59,11 +59,21 @@ class JointScaledBeta(Transformed):
     def __init__(self, alpha: Array, beta: Array, shift: float, scale: float):
         super().__init__(Beta(alpha, beta), ScalarAffine(shift, scale))
 
+        self.shrink_scale = (scale - 2.0e-7) / scale # introduces a small error to avoid nans from log_prob
+
+        # To avoid pointless NaNs, we define the mode of the (uniform) distribution when alpha == beta == 1.0 as the middle of the distribution. We also assume alpha, beta >= 1.0
+        middle = 0.5*ones_like(alpha).squeeze()
+        mode = ((alpha - 1.0) / (alpha + beta - 2.0 + 1e-34)).squeeze()
+        condition_batch = logical_and(alpha <= 1.0, beta <= 1.0).squeeze()
+        self.mode: Array = where(condition_batch, scale*middle + shift, scale*mode + shift) # type: ignore[override]
+
+
     def log_prob(self, value: Array) -> Array:
-        return sum(super().log_prob(value), axis=-1) # type: ignore[assignment]
+        return sum(super().log_prob(self.shrink_scale*value), axis=-1) # type: ignore[assignment]
 
     def entropy(self, input_hint: Optional[Array] = None) -> Array: # type: ignore[override]
-        return sum(super().entropy(input_hint), axis=-1)
+        return sum(super().entropy(input_hint=input_hint), axis=-1)
+
 
 
 # Flax module for a GRU cell that can be scanned and with static initializer method
@@ -103,11 +113,11 @@ class ActorRNN(Module):
         actor_mean = relu(actor_mean)
 
         # https://arxiv.org/pdf/2111.02202.pdf
-        alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
-        beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
+        _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
+        _beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
 
-        alpha = clip(alpha, 1.0, 100)
-        beta = clip(alpha, 1.0, 100)
+        alpha = clip(_alpha, 1.0, 100.0)
+        beta = clip(_beta, 1.0, 100.0)
 
         pi = JointScaledBeta(alpha, beta, -1.0, 2.0)
 

@@ -1,19 +1,26 @@
 """Based on PureJaxRL Implementation of IPPO, with changes to give a centralised critic."""
 import jax
+jax.config.update("jax_debug_nans", False)
+jax.config.update("jax_debug_infs", False)
+jax.config.update("jax_disable_jit", False)
+print(f"\n\njax_debug_nans is set to {jax.config._value_holders["jax_debug_nans"].value}.\n\n")
+print(f"\n\njax_debug_infs is set to {jax.config._value_holders["jax_debug_infs"].value}.\n\n")
+print(f"\n\njax_disable_jit is set to {jax.config._value_holders["jax_disable_jit"].value}.\n\n")
+
 import jax.numpy as jnp
 import numpy as np
 import optax
 import chex
 
 from functools import partial
-from typing import Any, Callable, NamedTuple, Never, Optional, Self
+from typing import Any, Callable, NamedTuple 
 from mujoco.mjx import Data
 from jax import Array 
 from jax._src.random import KeyArray 
 from distrax import Distribution 
 from flax.training.train_state import TrainState
 from flax.typing import VariableDict
-from optax._src.base import PyTree, ScalarOrSchedule
+from optax._src.base import ScalarOrSchedule
 from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
 from algorithms.utils import ScannedRNN, ActorRNN, CriticRNN, RunningStats
@@ -23,7 +30,7 @@ import pdb
 
 # TODO: make RNN length configurable
 # TODO: change env and algo to use iterable of actors and critics
-# BUG: subclass of distrax.Beta() to make joint Beta distribution needs testing
+# NOTE: subclass of distrax.Beta() to make joint Beta distribution could use formal testing
 
 
 @chex.dataclass
@@ -322,7 +329,7 @@ def gradient_minibatch_step(
 
 def shuffled_minibatches(
         num_envs: int, num_minibatches: int, minibatch_size: int,   # partial() these in train() 
-        batch: EpochBatch, rng: KeyArray
+        batch: EpochBatch, rng: KeyArray                            # remaining args after partial()
         ) -> tuple[Minibatch, ...]:
 
     permutation = jax.random.permutation(rng, num_envs)
@@ -416,16 +423,22 @@ def train_step(
     )
 
     def callback(args):
-        metrics, rewards, running_stats = args
-        print("\n::CALLBACK::\n")
+        metrics, rewards, critic_inputs, values, advantages, targets = args
+        print("\n::CALLBACK::\nmetrics:")
         pprint(metrics)
-        print("\n\n")
+        print("\n\nrewards:\n")
         pprint(rewards)
-        print("\n\n")
-        pprint(running_stats)
+        print("\n\ncritic_inputs:\n")
+        pprint(critic_inputs)
+        print("\n\nvalues:\n")
+        pprint(values)
+        print("\n\nadvantages:\n")
+        pprint(advantages)
+        print("\n\ntargets:\n")
+        pprint(targets)
         print("\n\n")
 
-    jax.experimental.io_callback(callback, None, (metrics, trajectory.rewards, env_final.actors.running_stats))
+    jax.experimental.io_callback(callback, None, (metrics, trajectory.rewards, critic_inputs, values, advantages, targets))
 
     updated_env_step_carry = EnvStepCarry(
             env_final.observations,
@@ -540,6 +553,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable:
 
     
 if __name__=="__main__":
+
     import reproducibility_globals
     from flax.training import train_state, checkpoints
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx # type: ignore[import]
@@ -551,7 +565,23 @@ if __name__=="__main__":
     from gc import collect
     from os import getcwd
 
-    current_dir = getcwd(); 
+    from algorithms.utils import JointScaledBeta 
+    from distrax import Beta, ScalarAffine, Transformed
+
+    # for i in jnp.arange(1.0, 100, 0.2):
+    #     action = jnp.array([-1.0], dtype=jnp.float32)
+    #     # for j in jnp.arange(1e-7, 1e-9, -1e-9): 
+    #     alpha = jnp.array([i], dtype=jnp.float32)
+    #     beta = jnp.array([i], dtype=jnp.float32)
+    #     pi = JointScaledBeta(alpha, beta, -1.0, 2.0)
+    #     _pi = Transformed(Beta(alpha, beta), ScalarAffine(-1.0, 2.0))
+    #     # _pi = Beta(alpha, beta)
+    #     print(i, pi.entropy(), _pi.entropy(), pi.mode, _pi.mode())
+    #     print(i, pi.log_prob(action), _pi.log_prob(action))
+
+    # input("hold")
+
+    current_dir = getcwd()
     assert current_dir.split("/")[-1] == "robust_rl"
 
     SCENE = "mujoco_models/scene.xml"
@@ -604,7 +634,7 @@ if __name__=="__main__":
         lr              = 2e-3,
         num_envs        = num_envs,
         num_env_steps   = 128,
-        total_timesteps = 128*2_097_152,
+        total_timesteps = 100_000, #128*2_097_152,
         update_epochs   = 4,
         num_minibatches = num_envs // 256,
         gamma           = 0.99,
@@ -639,7 +669,8 @@ if __name__=="__main__":
     out = train_fn(rng)
     print("\n\n...done running.\n\n")
 
-    env_final, step = out
+    train_final, metrics = out
+    env_final, step = train_final
     pprint(env_final.actors)
     pprint(env_final.critics)
     pprint(step)
