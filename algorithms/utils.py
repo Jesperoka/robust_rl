@@ -1,4 +1,4 @@
-from jax import Array, vmap
+from jax import Array 
 from jax.lax import scan, cond
 from jax.numpy import sum, where, newaxis, mean, zeros_like, ones_like, sqrt, squeeze, clip, logical_and
 from jax.random import PRNGKey
@@ -157,3 +157,4 @@ class CriticRNN(Module):
 register_static(ScannedRNN)
 register_static(ActorRNN)
 register_static(CriticRNN)
+

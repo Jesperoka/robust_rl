@@ -1,6 +1,6 @@
 """Configurables for the environment."""
 from jax import Array
-from jax.numpy import ones, float32 
+from jax.numpy import ones, array, float32 
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 from reproducibility_globals import PRNG_SEED 
@@ -18,6 +18,7 @@ class EnvironmentOptions:
     num_envs:       int = 1
     steps_per_ctrl: int = 1
     prng_seed:      int = PRNG_SEED
+    null_reward:    tuple[Array, Array] = field(default_factory=lambda: (array(0.0, dtype=float32), array(0.0, dtype=float32)))
     agent_ids:      tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
     obs_min:        Array = field(default_factory=lambda: -3.5*ones(39, dtype=float32))
     obs_max:        Array = field(default_factory=lambda: 3.5*ones(39, dtype=float32))

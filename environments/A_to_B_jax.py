@@ -1,9 +1,10 @@
+from numpy import ndarray
 import reproducibility_globals
 import jax
 import chex
 
 from functools import partial 
-from typing import Callable 
+from typing import Callable, overload 
 from math import pi
 
 from jax import Array, numpy as jnp
@@ -11,12 +12,10 @@ from chex import PRNGKey
 from mujoco.mjx import Model, Data, forward as mjx_forward, step as mjx_step
 from environments.options import EnvironmentOptions 
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
-# from environments import utils
 
 import pdb
 
 
-BIG_NUM: float = 100_000_000.0
 DEFAULT_RNG: PRNGKey = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
 
@@ -50,7 +49,7 @@ class A_to_B:
 
     def __init__(self, mjx_model: Model, mjx_data: Data, grip_site_id: int, options: EnvironmentOptions) -> None:
         self.mjx_model: Model = mjx_model
-        self.mjx_data: Data = mjx_data
+        # self.mjx_data: Data = mjx_data
         self.grip_site_id: int = grip_site_id
 
         self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
@@ -61,6 +60,7 @@ class A_to_B:
         self.steps_per_ctrl:  int = options.steps_per_ctrl
         self.agent_ids:       tuple[str, str] = options.agent_ids
         self.prng_key:        PRNGKey = jax.random.PRNGKey(options.prng_seed)
+        self.null_reward:     tuple[Array, Array] = options.null_reward
         self.obs_space:       Space = Space(low=options.obs_min, high=options.obs_max)
         self.act_space:       Space = Space(low=options.act_min, high=options.act_max)
         self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # hardcoded for now
@@ -99,9 +99,9 @@ class A_to_B:
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
-        observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
+        observation, _, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
     
-        return (mjx_data, p_goal), observation, reward, done
+        return (mjx_data, p_goal), observation, self.null_reward, done
 
     def reset_car_arm_and_gripper(self, rng: Array) -> tuple[Array, Array, Array]:
         rng, rng_car, rng_arm, rng_gripper = jax.random.split(rng, 4)                                   
@@ -165,7 +165,7 @@ class A_to_B:
          qd_gripper, qd_ball, p_goal) = self.decode_observation(observation)                     
 
         car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max)                          
-        arm_outside_limits = self.outside_limits(q_arm, minval=self.arm_limits.q_min, maxval=self.arm_limits.q_max)
+        arm_outside_limits = self.outside_limits(qd_arm, minval=self.arm_limits.q_dot_min, maxval=self.arm_limits.q_dot_max)
 
         # TODO: temporary, make self.ball_limits
         ball_outside_limits_x = self.outside_limits(q_ball[0:1], minval=self.car_limits.x_min, maxval=self.car_limits.x_max)        # type: ignore[assignment]
@@ -175,14 +175,14 @@ class A_to_B:
         car_goal_reached = self.car_goal_reached(q_car, p_goal)
         arm_goal_reached = self.arm_goal_reached(q_car, q_ball)
 
-        car_goal_reward = 1.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)                           
-        arm_goal_reward = 1.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)                           
-        car_outside_limits_reward = 100.0*jnp.astype(car_outside_limits, jnp.float32, copy=False)                       
-        arm_outside_limits_reward = 100.0*jnp.astype(arm_outside_limits, jnp.float32, copy=False)                       
-        zeus_reward, panda_reward = self.reward_fn(observation, action)           
+        car_goal_reward = 1.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)
+        arm_goal_reward = 1.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)
+        car_outside_limits_reward = 10.0*jnp.astype(car_outside_limits, jnp.float32, copy=False)
+        arm_outside_limits_reward = 10.0*jnp.astype(arm_outside_limits, jnp.float32, copy=False)
+        zeus_reward, panda_reward = self.reward_fn(observation, action)
 
-        zeus_reward = zeus_reward + car_goal_reward - arm_goal_reward - car_outside_limits_reward     
-        panda_reward = panda_reward + arm_goal_reward - car_goal_reward - arm_outside_limits_reward    
+        zeus_reward = zeus_reward + car_goal_reward - arm_goal_reward - car_outside_limits_reward
+        panda_reward = panda_reward + arm_goal_reward - car_goal_reward - arm_outside_limits_reward
         reward = (zeus_reward, panda_reward)
 
         done = jnp.logical_or(car_goal_reached, arm_goal_reached)
@@ -314,7 +314,6 @@ class A_to_B:
 if __name__ == "__main__":
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx, MjvCamera, Renderer # type: ignore[import]
     import matplotlib.pyplot as plt
-
 
     SCENE = "mujoco_models/scene.xml"
     OUTPUT_DIR = "demos/assets/"

@@ -4,7 +4,6 @@ import matplotlib
 import mujoco as mj
 import mujoco.viewer
 import numpy as np
-from brax import base, envs, math
 from jax import numpy as jnp
 from mujoco import mjx
 
@@ -17,13 +16,14 @@ from pprint import pprint
 SCENE = "mujoco_models/scene_with_balls_rack.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
-jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR) # type: ignore[attr-defined]
+jax.config.update("jax_compilation_cache_dir", COMPILATION_CACHE_DIR)
+# jax.experimental.compilation_cache.compilation_cache.initialize_cache(COMPILATION_CACHE_DIR) # type: ignore[attr-defined]
 
 
 # @jax.jit
 def ctrl_from_action(v: jnp.ndarray, theta: jnp.ndarray, omega: jnp.ndarray,
                      joint_angles: jnp.ndarray) -> jnp.ndarray:
-    return jnp.concatenate([joint_angles, v * jax.lax.cos(theta), v * jax.lax.sin(theta), omega], axis=0)
+    return jnp.concatenate([v * jax.lax.cos(theta), v * jax.lax.sin(theta), omega, joint_angles, jnp.zeros((4,))], axis=0)
 
 
 # @jax.jit
@@ -40,8 +40,7 @@ if __name__ == "__main__":
     data = mj.MjData(model)                 # type: ignore[attr-defined]
     mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
-    viewer = mujoco.viewer.launch(model, data)
-    # exit()
+    # viewer = mujoco.viewer.launch(model, data)
 
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)

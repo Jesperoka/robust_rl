@@ -1,11 +1,10 @@
-"""Config struct for the RL algorithms.
-    Adapted from JaxMarl: https://github.com/FLAIROx/JaxMARL"""
+"""Config struct for the RL algorithms. Adapted from JaxMarl: https://github.com/FLAIROx/JaxMARL"""
 from chex import dataclass
 
 @dataclass
 class AlgorithmConfig:
     num_envs:        int = 4096 
-    num_env_steps:   int = 128 # env steps per rollout # must be 128 # TODO: make configurable
+    num_env_steps:   int = 128 # env steps per rollout # must be 128 # TODO: make configurable # NOTE: this should already be configurable I think
     num_actors:      int = num_envs 
     total_timesteps: int = 2_000_000
     num_updates:     int = total_timesteps // num_env_steps // num_envs 
