@@ -5,7 +5,7 @@ import numpy as np
 from time import sleep
 
 from os import environ
-environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=3 "
 
 import jax.numpy as jnp
 from jax import default_device, devices, random
@@ -15,7 +15,7 @@ MARGIN = 0.1
 
 
 def data_display(height, width, rollout_length, display_queue):
-    with default_device(devices("cpu")[1]):
+    with default_device(devices("cpu")[2]):
         print("Display process started")
         current_metrics: tuple[list[tuple[float, float, float]], ...] = ([], [])
         _min, _max = float("inf"), -float("inf")
@@ -79,7 +79,7 @@ def data_display(height, width, rollout_length, display_queue):
 
             return img,
         
-        anim = animation.FuncAnimation(fig, update_anim, frames=rollout_length, interval=100, blit=False, repeat=True)
+        anim = animation.FuncAnimation(fig, update_anim, frames=rollout_length, interval=42, blit=False, repeat=True)
         plt.pause(0.01)
 
 def rollout_generator(rollout_fn, rollout_queue, display_queue):
@@ -102,7 +102,7 @@ def rollout_generator(rollout_fn, rollout_queue, display_queue):
             print("Running rollout")
             # frames = _rollout(rollout_inputs)
             frames = rollout_fn(rollout_inputs)
-            print("Rollout finished")
+            print("Rollout finished with ", len(frames), " frames")
 
             display_queue.put((metrics, frames))
 
@@ -192,11 +192,14 @@ if __name__ == "__main__":
     actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in actors.train_states)
 
     with default_device(devices("cpu")[1]):
-        _rollout_fn(actors)
+        r_frames = _rollout_fn(actors)
+        # print("Rollout finished with ", len(r_frames), " frames")
+        # input("hold")
+
 
     # we cannot shadow the names of the functions, since they are pickled by multiprocessing Process() with spawn() strategy
     _rollout_generator = partial(rollout_generator, _rollout_fn)    # type: ignore
-    _data_display = partial(data_display, 360, 640, 30)             # type: ignore
+    _data_display = partial(data_display, 360, 640, 500)             # type: ignore
 
     data_display_queue = multiprocessing.Queue()
     rollout_generator_queue = multiprocessing.Queue()

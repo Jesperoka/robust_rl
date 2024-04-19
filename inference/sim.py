@@ -82,7 +82,7 @@ def rollout(
         data: MjData, 
         actors: MultiActorRNN, 
         num_rnn_hidden: int = 128, 
-        max_steps: int = 100,
+        max_steps: int = 1000,
         height: int = 360,
         width: int = 640,
         fps: float = 24.0
@@ -157,7 +157,7 @@ def rollout(
 
         # Rendering
         renderer.update_scene(data, global_cam)
-        if step % ((1.0 / dt) / fps) == 0:
+        if step % (1.0/(fps*dt)) <= 9.0e-1:
             frames.append(renderer.render())
         
     return frames
