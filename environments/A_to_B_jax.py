@@ -1,10 +1,9 @@
-from numpy import ndarray
 import reproducibility_globals
 import jax
 import chex
 
 from functools import partial 
-from typing import Callable, overload 
+from typing import Callable 
 from math import pi
 
 from jax import Array, numpy as jnp
@@ -12,8 +11,6 @@ from chex import PRNGKey
 from mujoco.mjx import Model, Data, forward as mjx_forward, step as mjx_step
 from environments.options import EnvironmentOptions 
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
-
-import pdb
 
 
 DEFAULT_RNG: PRNGKey = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
@@ -49,14 +46,14 @@ class A_to_B:
 
     def __init__(self, mjx_model: Model, mjx_data: Data, grip_site_id: int, options: EnvironmentOptions) -> None:
         self.mjx_model: Model = mjx_model
-        # self.mjx_data: Data = mjx_data
+        # self.mjx_data: Data = mjx_data # TODO: remove mjx_data as argument
         self.grip_site_id: int = grip_site_id
 
         self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
         self.car_ctrl:        Callable[[Array], Array] = options.car_ctrl
         self.arm_ctrl:        Callable[[Array], Array] = options.arm_ctrl
         self.goal_radius:     float = options.goal_radius 
-        self.num_envs:        int = options.num_envs
+        # self.num_envs:        int = options.num_envs # TODO: remove num_envs as argument and from options
         self.steps_per_ctrl:  int = options.steps_per_ctrl
         self.agent_ids:       tuple[str, str] = options.agent_ids
         self.prng_key:        PRNGKey = jax.random.PRNGKey(options.prng_seed)
@@ -129,17 +126,16 @@ class A_to_B:
     # -------------------------------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0,))
     def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
-        ctrl = self.compute_controls(mjx_data, action)
+        car_orientation = self.get_car_orientation(mjx_data)
+        ctrl = self.compute_controls(car_orientation, action)
         mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
         observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
 
         return (mjx_data, p_goal), observation, reward, done  
     
-    def compute_controls(self, mjx_data: Data, action: Array) -> Array:
+    def compute_controls(self, car_orientation: Array, action: Array) -> Array:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)                                     
-
-        car_orientation = self.get_car_orientation(mjx_data)
         car_local_ctrl = self.car_ctrl(a_car)                                                                                   
         ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
         ctrl_arm = self.arm_ctrl(a_arm)
@@ -147,7 +143,6 @@ class A_to_B:
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
         return ctrl
-
 
     def n_step(self, mjx_model: Model, mjx_data: Data, ctrl: Array) -> Data:
 
@@ -157,7 +152,6 @@ class A_to_B:
 
         final, _ = jax.lax.scan(f, mjx_data, None, length=self.steps_per_ctrl)
         return final
-
     
     def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array]:
         (q_car, q_arm, q_gripper, 
@@ -195,10 +189,10 @@ class A_to_B:
 
     # ------------------------------------ begin subroutines ------------------------------------
     # -------------------------------------------------------------------------------------------
-    def get_car_orientation(self, mjx_data) -> Array:
+    def get_car_orientation(self, mjx_data: Data) -> Array:
         return mjx_data.qpos[self.car_orientation_index]                                                    
     
-    def observe(self, mjx_data, p_goal) -> Array:
+    def observe(self, mjx_data: Data, p_goal: Array) -> Array:
         return jnp.concatenate([                                                                                        
             mjx_data.qpos,
             mjx_data.qvel,

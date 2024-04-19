@@ -1,15 +1,21 @@
+from flax.training.train_state import TrainState
 from jax import Array 
+from jax._src.random import KeyArray
 from jax.lax import scan, cond
-from jax.numpy import sum, where, newaxis, mean, zeros_like, ones_like, sqrt, squeeze, clip, logical_and
+from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, ones_like, sqrt, squeeze, clip, logical_and, zeros
 from jax.random import PRNGKey
 from distrax import Beta, Transformed, ScalarAffine, Distribution
-from flax.linen import compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
+from flax.linen import FrozenDict, compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
-from typing import Any, Optional, NamedTuple
+from typing import Any, Iterable, Optional, NamedTuple
 from jax.tree_util import register_static
+from chex import dataclass
+from optax import chain, clip_by_global_norm, adam
 
 import pdb
+
+from optax import ScalarOrSchedule
 
 
 class RunningStats(NamedTuple):
@@ -69,10 +75,10 @@ class JointScaledBeta(Transformed):
 
 
     def log_prob(self, value: Array) -> Array:
-        return sum(super().log_prob(self.shrink_scale*value), axis=-1) # type: ignore[assignment]
+        return jnp_sum(super().log_prob(self.shrink_scale*value), axis=-1) # type: ignore[assignment]
 
     def entropy(self, input_hint: Optional[Array] = None) -> Array: # type: ignore[override]
-        return sum(super().entropy(input_hint=input_hint), axis=-1)
+        return jnp_sum(super().entropy(input_hint=input_hint), axis=-1)
 
 
 
@@ -158,3 +164,136 @@ register_static(ScannedRNN)
 register_static(ActorRNN)
 register_static(CriticRNN)
 
+
+@dataclass
+class MultiActorRNN:
+    num_actors:     int
+    networks:       tuple[ActorRNN, ...]
+    train_states:   tuple[TrainState, ...]
+    running_stats:  tuple[RunningStats, ...]
+
+# WARNING: this is a quick and dirty hack used for inference, MultiActorRNN should possibly only contain TrainState.params, not the full TrainStates
+@dataclass
+class FakeTrainState:
+    params: FrozenDict[str, Any]
+
+@dataclass
+class MultiCriticRNN:
+    num_critics:    int
+    networks:       tuple[CriticRNN, ...]
+    train_states:   tuple[TrainState, ...]
+
+
+# Convenience function for initializing actors, useful for checkpoint restoring (e.g. before inference)
+def init_actors(
+        actor_rngs: Iterable[KeyArray], 
+        num_envs: int, 
+        num_agents: int,
+        obs_size: int, 
+        act_sizes: Iterable[int], 
+        learning_rate: ScalarOrSchedule, 
+        max_grad_norm: float,
+        num_rnn_hidden: int = 128
+        ) -> tuple[MultiActorRNN, tuple[Array,...]]:
+
+    dummy_dones = zeros((1, num_envs))
+    dummy_actor_input = (zeros((1, num_envs, obs_size)), dummy_dones)
+    dummy_actor_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
+
+    dummy_statistics = RunningStats(
+            mean_obs=zeros(obs_size),
+            welford_S=zeros(obs_size),
+            running_count=0, 
+            skip_update=False
+    )
+
+    actor_networks = tuple(ActorRNN(action_dim=act_size) for act_size in act_sizes)
+    actor_network_params = tuple(network.init(rng, dummy_actor_hstate, dummy_actor_input, dummy_statistics) for rng, network in zip(actor_rngs, actor_networks))
+
+    actors = MultiActorRNN(
+        num_actors=num_agents,
+        networks=actor_networks,
+        train_states=tuple(
+            TrainState.create(
+                apply_fn=network.apply, 
+                params=params, 
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
+            ) for network, params in zip(actor_networks, actor_network_params)),
+        running_stats=tuple(dummy_statistics for _ in range(num_agents))
+    )
+    actor_hidden_states = tuple(dummy_actor_hstate for _ in range(num_agents))
+
+    return actors, actor_hidden_states 
+
+# Convenience function for initializing critics, useful for checkpoint restoring
+def init_critics(
+        critic_rngs: Iterable[KeyArray],
+        num_envs: int, 
+        num_agents: int,
+        obs_size: int, 
+        act_sizes: Iterable[int], 
+        learning_rate: ScalarOrSchedule, 
+        max_grad_norm: float,
+        num_rnn_hidden: int = 128
+        ) -> tuple[MultiCriticRNN, tuple[Array,...]]:
+
+    dummy_dones = zeros((1, num_envs))
+
+    dummy_critic_inputs = tuple(  
+            (zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
+            dummy_dones) for i in range(num_agents)
+    ) # We pass in all **other** agents' actions to each critic
+
+    critic_networks = tuple(CriticRNN() for _ in range(num_agents))
+    dummy_critic_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
+
+    critic_network_params = tuple(network.init(rng, dummy_critic_hstate, dummy_critic_input) 
+                                  for rng, network, dummy_critic_input in zip(critic_rngs, critic_networks, dummy_critic_inputs))
+
+    critics = MultiCriticRNN(
+        num_critics=num_agents,
+        networks=tuple(CriticRNN() for _ in range(num_agents)),
+        train_states=tuple(
+            TrainState.create(
+                apply_fn=network.apply, 
+                params=params, 
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
+            ) for network, params in zip(critic_networks, critic_network_params)),
+    )
+    critic_hidden_states = tuple(dummy_critic_hstate for _ in range(num_agents))
+
+    return critics, critic_hidden_states
+
+# Convenience function for forward pass of all actors
+def multi_actor_forward(
+        actors: MultiActorRNN,
+        inputs: tuple[tuple[Array, Array], ...], 
+        hidden_states: tuple[Array, ...],
+        ) -> tuple[MultiActorRNN, tuple[Distribution, ...], tuple[Array, ...]]:
+
+    network_params = tuple(train_state.params for train_state in actors.train_states)
+
+    hidden_states, policies, actors.running_stats = zip(*(
+         network.apply(params, hstate, input, running_stats) 
+         for network, params, hstate, input, running_stats
+         in zip(actors.networks, network_params, hidden_states, inputs, actors.running_stats)
+    ))
+
+    return actors, policies, hidden_states
+
+# Convenience function for forward pass of all critics 
+def multi_critic_forward(
+        critics: MultiCriticRNN,
+        inputs: tuple[tuple[Array, Array], ...],
+        hidden_states: tuple[Array, ...],
+        ) -> tuple[MultiCriticRNN, tuple[Array, ...], tuple[Array, ...]]:
+
+    network_params = tuple(train_state.params for train_state in critics.train_states)
+
+    hidden_states, values = zip(*(
+         network.apply(params, hstate, input) 
+         for network, params, hstate, input 
+         in zip(critics.networks, network_params, hidden_states, inputs)
+    ))
+
+    return critics, tuple(map(squeeze, values)), hidden_states

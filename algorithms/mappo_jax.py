@@ -3,9 +3,8 @@ from os import environ
 environ["XLA_FLAGS"] = (
         "--xla_gpu_enable_triton_softmax_fusion=true "
         "--xla_gpu_triton_gemm_any=true "
+        "--xla_force_host_platform_device_count=2 " # needed for multiprocessing
 )
-# import logging
-# logging.getLogger("jax").setLevel(logging.INFO)
 
 import jax
 from os.path import join, abspath, dirname
@@ -21,14 +20,9 @@ jax.config.update("jax_debug_infs", False); print(f"\njax_debug_infs is set to {
 jax.config.update("jax_disable_jit", False); print(f"\njax_disable_jit is set to {jax.config._value_holders["jax_disable_jit"].value}.\n\n")
 
 import jax.numpy as jnp
-import numpy as np
 import optax
 import chex
-import matplotlib.pyplot as plt
 
-from multiprocessing import Queue
-from functools import partial
-from typing import Any, Callable, Iterable, NamedTuple 
 from mujoco.mjx import Data
 from jax import Array 
 from jax._src.random import KeyArray 
@@ -36,9 +30,15 @@ from distrax import Distribution
 from flax.training.train_state import TrainState
 from flax.typing import VariableDict
 from optax._src.base import ScalarOrSchedule
+from functools import partial
+from typing import Any, Callable, Iterable, NamedTuple 
 from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
-from algorithms.utils import ScannedRNN, ActorRNN, CriticRNN, RunningStats
+from algorithms.utils import ActorRNN, CriticRNN, RunningStats, MultiActorRNN, MultiCriticRNN, init_actors, init_critics, multi_actor_forward, multi_critic_forward
+from multiprocessing import Process, Queue, set_start_method
+if __name__ == "__main__":
+    set_start_method("forkserver") 
+
 
 import pdb
 
@@ -46,19 +46,10 @@ import pdb
 # TODO: make RNN length configurable
 # NOTE: subclass of distrax.Beta() to make joint Beta distribution could use more formal testing
 
+# Global queues
+data_display_queue = Queue()
+rollout_generator_queue = Queue()
 
-@chex.dataclass
-class MultiActorRNN:
-    num_actors:     int
-    networks:       tuple[ActorRNN, ...]
-    train_states:   tuple[TrainState, ...]
-    running_stats:  tuple[RunningStats, ...]
-
-@chex.dataclass
-class MultiCriticRNN:
-    num_critics:    int
-    networks:       tuple[CriticRNN, ...]
-    train_states:   tuple[TrainState, ...]
 
 class Transition(NamedTuple):
     observations:   Array
@@ -120,121 +111,6 @@ class MinibatchMetrics(NamedTuple):
 EpochMetrics = MinibatchMetrics # type alias for final MinibatchMetrics of an epoch
 TrainStepMetrics = EpochMetrics # type alias for mean EpochMetrics of a train step
 
-# Convenience function for initializing actors, useful for checkpoint restoring (e.g. before inference)
-def init_actors(
-        actor_rngs: Iterable[KeyArray], 
-        num_envs: int, 
-        num_agents: int,
-        obs_size: int, 
-        act_sizes: Iterable[int], 
-        learning_rate: ScalarOrSchedule, 
-        max_grad_norm: float,
-        num_rnn_hidden: int = 128
-        ) -> tuple[MultiActorRNN, tuple[Array,...]]:
-
-    dummy_dones = jnp.zeros((1, num_envs))
-    dummy_actor_input = (jnp.zeros((1, num_envs, obs_size)), dummy_dones)
-    dummy_actor_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
-
-    dummy_statistics = RunningStats(
-            mean_obs=jnp.zeros(obs_size),
-            welford_S=jnp.zeros(obs_size),
-            running_count=0, 
-            skip_update=False
-    )
-
-    actor_networks = tuple(ActorRNN(action_dim=act_size) for act_size in act_sizes)
-    actor_network_params = tuple(network.init(rng, dummy_actor_hstate, dummy_actor_input, dummy_statistics) for rng, network in zip(actor_rngs, actor_networks))
-
-    actors = MultiActorRNN(
-        num_actors=num_agents,
-        networks=actor_networks,
-        train_states=tuple(
-            TrainState.create(
-                apply_fn=network.apply, 
-                params=params, 
-                tx=optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate, eps=1e-5))
-            ) for network, params in zip(actor_networks, actor_network_params)),
-        running_stats=tuple(dummy_statistics for _ in range(num_agents))
-    )
-    actor_hidden_states = tuple(dummy_actor_hstate for _ in range(num_agents))
-
-    return actors, actor_hidden_states 
-
-# Convenience function for initializing critics, useful for checkpoint restoring
-def init_critics(
-        critic_rngs: Iterable[KeyArray],
-        num_envs: int, 
-        num_agents: int,
-        obs_size: int, 
-        act_sizes: Iterable[int], 
-        learning_rate: ScalarOrSchedule, 
-        max_grad_norm: float,
-        num_rnn_hidden: int = 128
-        ) -> tuple[MultiCriticRNN, tuple[Array,...]]:
-
-    dummy_dones = jnp.zeros((1, num_envs))
-
-    dummy_critic_inputs = tuple(  
-            (jnp.zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
-            dummy_dones) for i in range(num_agents)
-    ) # We pass in all **other** agents' actions to each critic
-
-    critic_networks = tuple(CriticRNN() for _ in range(num_agents))
-    dummy_critic_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
-
-    critic_network_params = tuple(network.init(rng, dummy_critic_hstate, dummy_critic_input) 
-                                  for rng, network, dummy_critic_input in zip(critic_rngs, critic_networks, dummy_critic_inputs))
-
-    critics = MultiCriticRNN(
-        num_critics=num_agents,
-        networks=tuple(CriticRNN() for _ in range(num_agents)),
-        train_states=tuple(
-            TrainState.create(
-                apply_fn=network.apply, 
-                params=params, 
-                tx=optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate, eps=1e-5))
-            ) for network, params in zip(critic_networks, critic_network_params)),
-    )
-    critic_hidden_states = tuple(dummy_critic_hstate for _ in range(num_agents))
-
-    return critics, critic_hidden_states
-
-# Convenience function for forward pass of all actors
-def multi_actor_forward(
-        actors: MultiActorRNN,
-        inputs: tuple[tuple[Array, Array], ...], 
-        hidden_states: tuple[Array, ...],
-        ) -> tuple[MultiActorRNN, tuple[Distribution, ...], tuple[Array, ...]]:
-
-    network_params = tuple(train_state.params for train_state in actors.train_states)
-
-    hidden_states, policies, actors.running_stats = zip(*(
-         network.apply(params, hstate, input, running_stats) 
-         for network, params, hstate, input, running_stats
-         in zip(actors.networks, network_params, hidden_states, inputs, actors.running_stats)
-    ))
-
-    return actors, policies, hidden_states
-
-# Convenience function for forward pass of all critics 
-def multi_critic_forward(
-        critics: MultiCriticRNN,
-        inputs: tuple[tuple[Array, Array], ...],
-        hidden_states: tuple[Array, ...],
-        ) -> tuple[MultiCriticRNN, tuple[Array, ...], tuple[Array, ...]]:
-
-    network_params = tuple(train_state.params for train_state in critics.train_states)
-
-    hidden_states, values = zip(*(
-         network.apply(params, hstate, input) 
-         for network, params, hstate, input 
-         in zip(critics.networks, network_params, hidden_states, inputs)
-    ))
-
-    return critics, tuple(map(jnp.squeeze, values)), hidden_states
-
-
 def env_step(
         env: Any, num_envs: int,                    # partial() these in make_train()
         carry: EnvStepCarry, step_rng: KeyArray     # remaining args after partial()
@@ -243,7 +119,7 @@ def env_step(
     reset_rngs, *action_rngs = jax.random.split(step_rng, env.num_agents+1)
 
     actor_inputs = tuple(
-            (carry.observations[np.newaxis, :], carry.dones[np.newaxis, :]) 
+            (carry.observations[jnp.newaxis, :], carry.dones[jnp.newaxis, :]) 
             for _ in range(env.num_agents)
     )
     # WARNING: it's a little bit confusing that I call the distrbutions "policies" here
@@ -495,7 +371,7 @@ def train_step(
         gamma: float, gae_lambda: float,                                        # partial() these in make_train()
         env_step_fn: Callable,                                                  # partial() these in make_train()
         gradient_epoch_step_fn: Callable[..., tuple[EpochCarry, EpochMetrics]], # partial() these in make_train()
-        rollout_generator_queue: Queue,                                         # partial() these in make_train()
+        # rollout_generator_queue: Queue,                                         # partial() these in make_train()
         carry: TrainStepCarry, train_step_rngs: KeyArray                        # remaining args after partial()
         ) -> tuple[TrainStepCarry, TrainStepMetrics]:
 
@@ -527,14 +403,17 @@ def train_step(
     )
     
     def callback(args):
-        actors, (actor_losses, critic_losses, entropies, total_losses), min_mean_max_rewards, step = args 
+        with jax.default_device(jax.devices("cpu")[0]):
+            global rollout_generator_queue
 
-        pprint(min_mean_max_rewards)
-        print("\nstep:", step)
+            actors, (actor_losses, critic_losses, entropies, total_losses), min_mean_max_rewards, step = args 
 
-        actors = jax.device_put(actors, jax.devices("cpu")[0])
-        min_mean_max_rewards = jax.device_put(min_mean_max_rewards, jax.devices("cpu")[0])
-        rollout_generator_queue.put((min_mean_max_rewards, actors))
+            pprint(min_mean_max_rewards)
+            print("\nstep:", step)
+
+            actors = jax.device_put(actors, jax.devices("cpu")[1])
+            min_mean_max_rewards = jax.device_put(min_mean_max_rewards, jax.devices("cpu")[1])
+            rollout_generator_queue.put((min_mean_max_rewards, actors))
 
         # TODO: MAYBE async checkpointing
     
@@ -544,9 +423,9 @@ def train_step(
             jax.tree_util.tree_map(lambda reward: jnp.min(reward), all_mean_rewards),
             jax.tree_util.tree_map(lambda reward: jnp.mean(reward), all_mean_rewards),
             jax.tree_util.tree_map(lambda reward: jnp.max(reward), all_mean_rewards)
-    )
+    ) # ((min0, min1), (mean0, mean1), (max0, max1))
 
-    jax.experimental.io_callback(callback, None, (train_step_metrics, min_mean_max_rewards, step_count))
+    jax.experimental.io_callback(callback, None, (epoch_final.actors, train_step_metrics, min_mean_max_rewards, step_count))
 
     updated_env_step_carry = EnvStepCarry(
             env_final.observations,
@@ -564,7 +443,7 @@ def train_step(
 
 # Top level function to create train function
 # -------------------------------------------------------------------------------------------------------
-def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Queue) -> Callable:
+def make_train(config: AlgorithmConfig, env: A_to_B) -> Callable:
 
     # Here we set up the partial application of all the functions that will be used in the training loop
     # -------------------------------------------------------------------------------------------------------
@@ -574,7 +453,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
     gradient_minibatch_step_fn = partial(gradient_minibatch_step, multi_actor_loss_fn, multi_critic_loss_fn, env.num_agents)
     shuffled_minibatches_fn = partial(shuffled_minibatches, config.num_envs, config.num_minibatches, config.minibatch_size)
     gradient_epoch_step_fn = partial(gradient_epoch_step, shuffled_minibatches_fn, gradient_minibatch_step_fn)
-    train_step_fn = partial(train_step, config.num_env_steps, config.update_epochs, config.gamma, config.gae_lambda, env_step_fn, gradient_epoch_step_fn, rollout_generator_queue)
+    train_step_fn = partial(train_step, config.num_env_steps, config.update_epochs, config.gamma, config.gae_lambda, env_step_fn, gradient_epoch_step_fn)
     # -------------------------------------------------------------------------------------------------------
 
     # TODO: move to utils and partial() config values
@@ -608,7 +487,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
         environment_state, observations, rewards, dones = jax.vmap(env.reset, in_axes=(0, 0))(reset_rngs, mjx_data_batch)
 
         actor_inputs = tuple(
-                (observations[np.newaxis, :], dones[np.newaxis, :]) 
+                (observations[jnp.newaxis, :], dones[jnp.newaxis, :]) 
                 for _ in range(env.num_agents)
         )
         _, initial_policies, _ = multi_actor_forward(actors, actor_inputs, actor_hidden_states)
@@ -632,8 +511,6 @@ if __name__=="__main__":
     import reproducibility_globals
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, checkpoint_utils
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx # type: ignore[import]
-    # environ["MUJOCO_GL"] = "osmesa"
-
     from environments.A_to_B_jax import A_to_B
     from environments.options import EnvironmentOptions
     from environments.physical import ZeusLimits, PandaLimits
@@ -642,7 +519,7 @@ if __name__=="__main__":
     from os.path import join, abspath, dirname
     from inference.sim import rollout 
     from algorithms.visualize import data_display, rollout_generator
-    from multiprocessing import Process, Queue
+
 
     # from algorithms.utils import JointScaledBeta 
     # from distrax import Beta, ScalarAffine, Transformed
@@ -687,7 +564,7 @@ if __name__=="__main__":
 
         return zeus_dist_reward, panda_dist_reward
 
-    num_envs = 4096 
+    num_envs = 4096 // 4
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = reward_function,
         # car_ctrl       = ,
@@ -712,9 +589,12 @@ if __name__=="__main__":
     # _rng1, _rng2 = jax.random.split(rng)
     # _actors, _actor_hidden_states = init_actors((_rng1, _rng2), _num_envs, env.num_agents, _obs_size, _act_sizes, 0.1, 0.5, 128)
     # pdb.set_trace()
-    # frames = rollout(env, model, data, _actors)
-    # print(frames)
-    # input("hold")
+    # with jax.default_device(jax.devices("cpu")[1]):
+    #     jax.device_put(_actors, jax.devices("cpu")[1])
+    #     jax.device_put(_actor_hidden_states, jax.devices("cpu")[1])
+    #     frames = rollout(env, model, data, _actors)
+    #     print(frames)
+    #     input("hold")
 
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 2e-3,
@@ -745,17 +625,15 @@ if __name__=="__main__":
     pprint(config)
 
     rollout_fn = partial(rollout, env, model, data)
-    rollout_generator = partial(rollout_generator, rollout_fn)
-    data_display = partial(data_display, 360, 640, 30)
+    rollout_generator_fn = partial(rollout_generator, rollout_fn)
+    data_display_fn = partial(data_display, 360, 640, 30)
     
-    data_display_queue = Queue()
-    rollout_generator_queue = Queue()
 
-    data_display_process = Process(target=data_display, args=(data_display_queue,))
-    rollout_generator_process = Process(target=rollout_generator, args=(rollout_generator_queue, data_display_queue))
+    data_display_process = Process(target=data_display_fn, args=(data_display_queue,))
+    rollout_generator_process = Process(target=rollout_generator_fn, args=(rollout_generator_queue, data_display_queue))
 
     print("\n\ncompiling train_fn()...\n\n")
-    train_fn = jax.jit(make_train(config, env, rollout_generator_queue)).lower(rng).compile()
+    train_fn = jax.jit(make_train(config, env)).lower(rng).compile()
     print("\n\n...done compiling.\n\n")
 
     data_display_process.start()
@@ -764,9 +642,6 @@ if __name__=="__main__":
     print("\n\nrunning train_fn()...\n\n")
     out = train_fn(rng)
     print("\n\n...done running.\n\n")
-
-    rollout_generator_process.join()
-    data_display_process.join()
 
     train_final, metrics = out
     env_final, step = train_final
@@ -778,6 +653,9 @@ if __name__=="__main__":
     restore_args = checkpoint_utils.construct_restore_args(env_final.actors)
     checkpointer.save(join(CHECKPOINT_DIR,"checkpoint_TEST"), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     print("\n...actors saved.\n\n")
+
+    rollout_generator_process.join()
+    data_display_process.join()
 
     sequence_length = 20
     num_envs = 1
