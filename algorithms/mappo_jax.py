@@ -213,7 +213,7 @@ def actor_loss(
         return actor_loss, entropy
 
     inputs = (minibatch_observation, minibatch_done)
-    _, pi, _ = network.apply(params, hidden_states, inputs, running_stats)  # type: ignore[assignment]
+    _, pi, _ = network.apply(params, hidden_states.squeeze(), inputs, running_stats)  # type: ignore[assignment]
     log_prob = pi.log_prob(minibatch_action)                                # type: ignore[attr-defined]
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
     actor_loss, entropy = loss(gae, log_prob, minibatch_log_prob, pi)
@@ -249,7 +249,7 @@ def critic_loss(
         return critic_loss 
     
     inputs = (jnp.concatenate([minibatch_observation, minibatch_other_actions], axis=-1), minibatch_done)
-    _, value, _ = network.apply(params, hidden_states, inputs, running_stats) # type: ignore[assignment]
+    _, value, _ = network.apply(params, hidden_states.squeeze(), inputs, running_stats) # type: ignore[assignment]
     critic_loss = loss(value, minibatch_value, minibatch_target, minibatch_done)
 
     return critic_loss
@@ -319,14 +319,19 @@ def shuffled_minibatches(
     permutation = jax.random.permutation(rng, num_envs)
     shuffled_batch = jax.tree_util.tree_map(lambda x: jnp.take(x, permutation, axis=1), batch)
 
-    def to_minibatches(x: Array) -> Array:
-        x = jnp.reshape(x, (x.shape[0], num_minibatches, minibatch_size, -1)).squeeze()
-        x = jnp.swapaxes(x, 0, 1)
-        return x
+    # TODO: check if correct not that squeeze() is gone
+    # def to_minibatches(x: Array) -> Array:
+    #     x = jnp.reshape(x, (x.shape[0], num_minibatches, minibatch_size, -1))
+    #     x = jnp.swapaxes(x, 0, 1)
+    #     return x
+
+    minibatches = jax.tree_util.tree_map(
+            lambda x: jnp.swapaxes(jnp.reshape(x, [x.shape[0], num_minibatches, -1] + list(x.shape[2:]),), 1, 0), shuffled_batch
+    )
     
-    minibatches = jax.tree_util.tree_map(to_minibatches, shuffled_batch)
-    minibatches = minibatches._replace(actor_hidden_states=jax.tree_util.tree_map(lambda x: x.swapaxes(1, 2), minibatches.actor_hidden_states))
-    minibatches = minibatches._replace(critic_hidden_states=jax.tree_util.tree_map(lambda x: x.swapaxes(1, 2), minibatches.critic_hidden_states))
+    # minibatches = jax.tree_util.tree_map(to_minibatches, shuffled_batch)
+    # minibatches = minibatches._replace(actor_hidden_states=jax.tree_util.tree_map(lambda x: x.swapaxes(1, 2), minibatches.actor_hidden_states))
+    # minibatches = minibatches._replace(critic_hidden_states=jax.tree_util.tree_map(lambda x: x.swapaxes(1, 2), minibatches.critic_hidden_states))
 
     return minibatches
 
@@ -337,12 +342,13 @@ def gradient_epoch_step(
         carry: EpochCarry, epoch_rng: KeyArray                                              # remaining args after partial()
         ) -> tuple[EpochCarry, EpochMetrics]:
 
-    actor_hidden_states = tuple(hidden_state.transpose() for hidden_state in carry.actor_hidden_states)
-    critic_hidden_states = tuple(hidden_state.transpose() for hidden_state in carry.critic_hidden_states)
+    # DEBUG: copy initial hidden states just in case
+    init_actor_hidden_states = tuple(hidden_state.copy()[jnp.newaxis, :] for hidden_state in carry.actor_hidden_states)
+    init_critic_hidden_states = tuple(hidden_state.copy()[jnp.newaxis, :] for hidden_state in carry.critic_hidden_states)
 
     batch = EpochBatch(
-            actor_hidden_states,
-            critic_hidden_states,
+            init_actor_hidden_states,
+            init_critic_hidden_states,
             carry.trajectory,
             carry.advantages,
             carry.targets
@@ -382,12 +388,16 @@ def train_step(
         carry: TrainStepCarry, train_step_rngs: KeyArray                        # remaining args after partial()
         ) -> tuple[TrainStepCarry, TrainStepMetrics]:
 
-
     train_step_rngs, step_rngs = jax.random.split(train_step_rngs)
     step_rngs = jax.random.split(step_rngs, num_env_steps)
     epoch_rngs = jax.random.split(train_step_rngs, num_gradient_epochs)
 
     env_step_carry, step_count = carry 
+
+    # DEBUG: copy initial hidden states just in case
+    init_actor_hidden_states = tuple(hidden_state.copy() for hidden_state in env_step_carry.actor_hidden_states)
+    init_critic_hidden_states = tuple(hidden_state.copy() for hidden_state in env_step_carry.critic_hidden_states)
+
     env_final, trajectory = jax.lax.scan(env_step_fn, env_step_carry, step_rngs, num_env_steps)
     step_count += 1
     
@@ -399,7 +409,7 @@ def train_step(
     _, values, _ = multi_critic_forward(env_final.critics, critic_inputs, env_final.critic_hidden_states)
     advantages, targets = batch_multi_gae(trajectory, values, gamma, gae_lambda) 
 
-    epoch_carry = EpochCarry(env_final.actors, env_final.critics, env_step_carry.actor_hidden_states, env_step_carry.critic_hidden_states, trajectory, advantages, targets)
+    epoch_carry = EpochCarry(env_final.actors, env_final.critics, init_actor_hidden_states, init_critic_hidden_states, trajectory, advantages, targets)
     epoch_final, epoch_metrics = jax.lax.scan(gradient_epoch_step_fn, epoch_carry, epoch_rngs, num_gradient_epochs)
 
     train_step_metrics = TrainStepMetrics(
