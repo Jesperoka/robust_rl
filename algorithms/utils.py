@@ -8,14 +8,12 @@ from distrax import Beta, Transformed, ScalarAffine, Distribution
 from flax.linen import FrozenDict, compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
-from typing import Any, Iterable, Optional, NamedTuple
+from typing import Any, Callable, Iterable, Optional, NamedTuple
 from jax.tree_util import register_static
 from chex import dataclass
 from optax import chain, clip_by_global_norm, adam
 
 import pdb
-
-from optax import ScalarOrSchedule
 
 
 class RunningStats(NamedTuple):
@@ -89,7 +87,7 @@ class ScannedRNN(Module):
     def __call__(self, carry, x) -> tuple[Array, Array]: # type: ignore[override]
         rnn_state = carry
         ins, resets = x
-        rnn_state = where(resets[:, newaxis], self.initialize_carry(ins.shape[0], ins.shape[1]), rnn_state)
+        rnn_state = where(resets[:, newaxis], self.initialize_carry(*rnn_state.shape), rnn_state)
         new_rnn_state, y = GRUCell(features=ins.shape[1])(rnn_state, ins)
 
         return new_rnn_state, y
@@ -101,26 +99,29 @@ class ScannedRNN(Module):
 
 class ActorRNN(Module):
     action_dim: int
+    hidden_size: int
+    # dense_size: int # TODO: add
 
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Distribution, Any]: # type: ignore[override]
         obs, dones = x
+        obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
         obs, statistics = cond(statistics.skip_update, lambda o, s: (o, s), normalize_input, obs, statistics)
 
         embedding = Dense(
-            128, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0)
+            self.hidden_size, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0)
         )(obs)
         embedding = relu(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
 
-        actor_mean = Dense(128, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(embedding)
+        actor_mean = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
         actor_mean = relu(actor_mean)
 
         # https://arxiv.org/pdf/2111.02202.pdf
-        _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
-        _beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(actor_mean)) + 1.0
+        _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)) + 1.0
+        _beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(actor_mean)) + 1.0
 
         alpha = clip(_alpha, 1.0, 100.0)
         beta = clip(_beta, 1.0, 100.0)
@@ -136,27 +137,32 @@ class ActorRNN(Module):
 
         return hidden, pi, statistics 
 
-# TODO: add input normalization to critic
+# TODO: experiment with shared critic
 class CriticRNN(Module):
+    hidden_size: int
+    # dense_size: int # TODO: add
     
     @compact
-    def __call__(self, hidden, x) -> tuple[Array, Array]: # type: ignore[override]
+    def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Array, RunningStats]: # type: ignore[override]
         critic_obs, dones = x
-        embedding = Dense(128, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
+        critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        critic_obs, statistics = cond(statistics.skip_update, lambda o, s: (o, s), normalize_input, critic_obs, statistics)
+
+        embedding = Dense(self.hidden_size, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0))(critic_obs)
         embedding = relu(embedding)
         
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
         
-        critic = Dense(128, kernel_init=orthogonal(2.0), bias_init=constant(0.0))(
+        critic = Dense(self.hidden_size, kernel_init=orthogonal(2.0), bias_init=constant(0.0))(
             embedding
         )
         critic = relu(critic)
-        critic = Dense(1, kernel_init=orthogonal(0.0001), bias_init=constant(0.0))(
+        critic = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
         
-        return hidden, squeeze(critic, axis=-1)
+        return hidden, squeeze(critic, axis=-1), statistics
 
 # Allows passing module as carry to jax.lax.scan in training loop
 # BUG: I need to check if the actors and critics can be static (PyTree with no leaves) otherwise I might need to capture with partial() in make_train()
@@ -164,24 +170,36 @@ register_static(ScannedRNN)
 register_static(ActorRNN)
 register_static(CriticRNN)
 
+def linear_schedule(
+        num_minibatches: int, update_epochs: int, num_updates: int, learning_rate: float,  # partial() these in make_train()
+        count: int                                                                          # remaining arg after partial()
+        ) -> float:
+
+    return learning_rate*(1.0 - (count // (num_minibatches * update_epochs)) / num_updates)
+
+# hacky, but actually pretty useful
+@dataclass
+class FakeTrainState:
+    params: FrozenDict[str, Any]
+    def apply_gradients(self, *args, **kwargs): return self 
+
 
 @dataclass
 class MultiActorRNN:
     num_actors:     int
+    rnn_hidden_size: int
     networks:       tuple[ActorRNN, ...]
-    train_states:   tuple[TrainState, ...]
+    train_states:   tuple[TrainState | FakeTrainState, ...]
     running_stats:  tuple[RunningStats, ...]
 
-# WARNING: this is a quick and dirty hack used for inference, MultiActorRNN should possibly only contain TrainState.params, not the full TrainStates
-@dataclass
-class FakeTrainState:
-    params: FrozenDict[str, Any]
 
 @dataclass
 class MultiCriticRNN:
     num_critics:    int
+    rnn_hidden_size: int
     networks:       tuple[CriticRNN, ...]
     train_states:   tuple[TrainState, ...]
+    running_stats:  tuple[RunningStats, ...]
 
 
 # Convenience function for initializing actors, useful for checkpoint restoring (e.g. before inference)
@@ -191,27 +209,24 @@ def init_actors(
         num_agents: int,
         obs_size: int, 
         act_sizes: Iterable[int], 
-        learning_rate: ScalarOrSchedule, 
+        learning_rate: Callable | float,
         max_grad_norm: float,
-        num_rnn_hidden: int = 128
+        rnn_hidden_size: int 
         ) -> tuple[MultiActorRNN, tuple[Array,...]]:
 
     dummy_dones = zeros((1, num_envs))
     dummy_actor_input = (zeros((1, num_envs, obs_size)), dummy_dones)
-    dummy_actor_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
+    dummy_actor_hstate = ScannedRNN.initialize_carry(num_envs, rnn_hidden_size)
+    dummy_statistics = tuple(RunningStats(mean_obs=zeros(obs_size), welford_S=zeros(obs_size), running_count=0, skip_update=False)
+                             for _ in range(num_agents))
 
-    dummy_statistics = RunningStats(
-            mean_obs=zeros(obs_size),
-            welford_S=zeros(obs_size),
-            running_count=0, 
-            skip_update=False
-    )
-
-    actor_networks = tuple(ActorRNN(action_dim=act_size) for act_size in act_sizes)
-    actor_network_params = tuple(network.init(rng, dummy_actor_hstate, dummy_actor_input, dummy_statistics) for rng, network in zip(actor_rngs, actor_networks))
+    actor_networks = tuple(ActorRNN(action_dim=act_size, hidden_size=rnn_hidden_size) for act_size in act_sizes)
+    actor_network_params = tuple(network.init(rng, dummy_actor_hstate, dummy_actor_input, dummy_stats) 
+                                 for rng, network, dummy_stats in zip(actor_rngs, actor_networks, dummy_statistics))
 
     actors = MultiActorRNN(
         num_actors=num_agents,
+        rnn_hidden_size=rnn_hidden_size,
         networks=actor_networks,
         train_states=tuple(
             TrainState.create(
@@ -219,9 +234,9 @@ def init_actors(
                 params=params, 
                 tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
             ) for network, params in zip(actor_networks, actor_network_params)),
-        running_stats=tuple(dummy_statistics for _ in range(num_agents))
+        running_stats=dummy_statistics
     )
-    actor_hidden_states = tuple(dummy_actor_hstate for _ in range(num_agents))
+    actor_hidden_states = tuple(dummy_actor_hstate.copy() for _ in range(num_agents))
 
     return actors, actor_hidden_states 
 
@@ -232,9 +247,9 @@ def init_critics(
         num_agents: int,
         obs_size: int, 
         act_sizes: Iterable[int], 
-        learning_rate: ScalarOrSchedule, 
+        learning_rate: Callable | float, 
         max_grad_norm: float,
-        num_rnn_hidden: int = 128
+        rnn_hidden_size: int 
         ) -> tuple[MultiCriticRNN, tuple[Array,...]]:
 
     dummy_dones = zeros((1, num_envs))
@@ -244,23 +259,29 @@ def init_critics(
             dummy_dones) for i in range(num_agents)
     ) # We pass in all **other** agents' actions to each critic
 
-    critic_networks = tuple(CriticRNN() for _ in range(num_agents))
-    dummy_critic_hstate = ScannedRNN.initialize_carry(num_envs, num_rnn_hidden)
+    dummy_critic_hstate = ScannedRNN.initialize_carry(num_envs, rnn_hidden_size)
+    dummy_statistics = tuple(RunningStats(mean_obs=zeros(critic_input[0].shape[-1]), welford_S=zeros(critic_input[0].shape[-1]), running_count=0, skip_update=False)
+                             for critic_input in dummy_critic_inputs)
 
-    critic_network_params = tuple(network.init(rng, dummy_critic_hstate, dummy_critic_input) 
-                                  for rng, network, dummy_critic_input in zip(critic_rngs, critic_networks, dummy_critic_inputs))
+
+    critic_networks = tuple(CriticRNN(rnn_hidden_size) for _ in range(num_agents))
+
+    critic_network_params = tuple(network.init(rng, dummy_critic_hstate, dummy_critic_input, dummy_stats) 
+                                  for rng, network, dummy_critic_input, dummy_stats in zip(critic_rngs, critic_networks, dummy_critic_inputs, dummy_statistics))
 
     critics = MultiCriticRNN(
         num_critics=num_agents,
-        networks=tuple(CriticRNN() for _ in range(num_agents)),
+        rnn_hidden_size=rnn_hidden_size,
+        networks=critic_networks,
         train_states=tuple(
             TrainState.create(
                 apply_fn=network.apply, 
                 params=params, 
                 tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
             ) for network, params in zip(critic_networks, critic_network_params)),
+        running_stats=dummy_statistics
     )
-    critic_hidden_states = tuple(dummy_critic_hstate for _ in range(num_agents))
+    critic_hidden_states = tuple(dummy_critic_hstate.copy() for _ in range(num_agents))
 
     return critics, critic_hidden_states
 
@@ -290,10 +311,10 @@ def multi_critic_forward(
 
     network_params = tuple(train_state.params for train_state in critics.train_states)
 
-    hidden_states, values = zip(*(
-         network.apply(params, hstate, input) 
-         for network, params, hstate, input 
-         in zip(critics.networks, network_params, hidden_states, inputs)
+    hidden_states, values, critics.running_stats = zip(*(
+         network.apply(params, hstate, input, running_stats) 
+         for network, params, hstate, input, running_stats
+         in zip(critics.networks, network_params, hidden_states, inputs, critics.running_stats)
     ))
 
     return critics, tuple(map(squeeze, values)), hidden_states
