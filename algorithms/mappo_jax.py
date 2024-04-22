@@ -206,8 +206,8 @@ def actor_loss(
     def loss(gae, log_prob, minibatch_log_prob, pi):
         ratio = jnp.exp(log_prob - minibatch_log_prob)
         clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-        loss_actor = -jnp.minimum(ratio*gae, clipped_ratio*gae).mean() # CHANGE: .mean(where=(1 - minibatch_done))
-        entropy = pi.entropy().mean()                                  # CHANGE: .mean(where=(1 - minibatch_done)) # type: ignore[attr-defined]
+        loss_actor = -jnp.minimum(ratio*gae, clipped_ratio*gae).mean(where=(1 - minibatch_done))
+        entropy = pi.entropy().mean(where=(1 - minibatch_done)) # type: ignore[attr-defined]
         actor_loss = loss_actor - ent_coef * entropy
 
         return actor_loss, entropy
@@ -239,7 +239,7 @@ def critic_loss(
         value_pred_clipped = minibatch_value + (value - minibatch_value).clip(-clip_eps, clip_eps)
         value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
         value_losses_unclipped = jnp.square(value - minibatch_target)
-        value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()   # CHANGE .mean(where=(1 - minibatch_done))
+        value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean(where=(1 - minibatch_done))
 
         ### Without Value clipping
         # value_losses = 0.5 * jnp.square(value - minibatch_target).mean(where=(1 - minibatch_done))
