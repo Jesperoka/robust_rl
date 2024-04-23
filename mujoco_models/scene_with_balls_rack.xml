@@ -76,7 +76,7 @@
     <!-- Scene -->
     <worldbody>
 
-        <light pos="0 0 2.5" dir="0 0 -1" directional="true" />
+        <light pos="0 0 2.5" dir="0 0 -1" directional="false" exponent="1000"/>
         <body name="ground" pos="0 0 0">
             <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane"
                 friction="0.001" />

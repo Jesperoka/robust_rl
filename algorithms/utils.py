@@ -36,8 +36,10 @@ def batch_welford_update(init_carry: tuple[Array, Array, int], x_batch: Array) -
     return (M_new, S_new, count)
 
 
+# TODO: fix: why am I passing obs to cond functions?
+
 # Input normalization using Welford algorithm for running statistics
-def normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
+def update_and_normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
     mean_obs, welford_S, running_count, skip_update = statistics 
 
     stacked_obs = obs.reshape(-1, obs.shape[-1]) # merge batch and env dimensions (we assume observation dimension is flat and last)
@@ -54,6 +56,13 @@ def normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, Runnin
     mean_obs, welford_S, running_count, first = cond(running_count == 0, first_update, update, (stacked_obs, obs, mean_obs, welford_S, running_count))
 
     var = welford_S / (running_count - 1 + first)
+
+    return standardize(x=obs, mean=mean_obs, variance=var), RunningStats(mean_obs, welford_S, running_count, skip_update)
+
+def normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
+    mean_obs, welford_S, running_count, skip_update = statistics 
+    first = (running_count == 0)
+    var = welford_S / (running_count - 1 + where(first, 1, 0))
 
     return standardize(x=obs, mean=mean_obs, variance=var), RunningStats(mean_obs, welford_S, running_count, skip_update)
 
@@ -106,7 +115,7 @@ class ActorRNN(Module):
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Distribution, Any]: # type: ignore[override]
         obs, dones = x
         obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
-        obs, statistics = cond(statistics.skip_update, lambda o, s: (o, s), normalize_input, obs, statistics)
+        obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, obs, statistics)
 
         embedding = Dense(
             self.hidden_size, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0)
@@ -146,7 +155,7 @@ class CriticRNN(Module):
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Array, RunningStats]: # type: ignore[override]
         critic_obs, dones = x
         critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
-        critic_obs, statistics = cond(statistics.skip_update, lambda o, s: (o, s), normalize_input, critic_obs, statistics)
+        critic_obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, critic_obs, statistics)
 
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(sqrt(2.0)), bias_init=constant(0.0))(critic_obs)
         embedding = relu(embedding)
@@ -158,17 +167,18 @@ class CriticRNN(Module):
             embedding
         )
         critic = relu(critic)
-        critic = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+        critic = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(-10.0))(
             critic
         )
         
         return hidden, squeeze(critic, axis=-1), statistics
 
+
 # Allows passing module as carry to jax.lax.scan in training loop
-# BUG: I need to check if the actors and critics can be static (PyTree with no leaves) otherwise I might need to capture with partial() in make_train()
 register_static(ScannedRNN)
 register_static(ActorRNN)
 register_static(CriticRNN)
+
 
 def linear_schedule(
         num_minibatches: int, update_epochs: int, num_updates: int, learning_rate: float,  # partial() these in make_train()
@@ -186,20 +196,20 @@ class FakeTrainState:
 
 @dataclass
 class MultiActorRNN:
-    num_actors:     int
-    rnn_hidden_size: int
-    networks:       tuple[ActorRNN, ...]
-    train_states:   tuple[TrainState | FakeTrainState, ...]
-    running_stats:  tuple[RunningStats, ...]
+    num_actors:         int
+    rnn_hidden_size:    int
+    networks:           tuple[ActorRNN, ...]
+    train_states:       tuple[TrainState | FakeTrainState, ...]
+    running_stats:      tuple[RunningStats, ...]
 
 
 @dataclass
 class MultiCriticRNN:
-    num_critics:    int
-    rnn_hidden_size: int
-    networks:       tuple[CriticRNN, ...]
-    train_states:   tuple[TrainState, ...]
-    running_stats:  tuple[RunningStats, ...]
+    num_critics:        int
+    rnn_hidden_size:    int
+    networks:           tuple[CriticRNN, ...]
+    train_states:       tuple[TrainState, ...]
+    running_stats:      tuple[RunningStats, ...]
 
 
 # Convenience function for initializing actors, useful for checkpoint restoring (e.g. before inference)

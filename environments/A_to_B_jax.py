@@ -3,7 +3,7 @@ import jax
 import chex
 
 from functools import partial 
-from typing import Callable 
+from typing import Any, Callable 
 from math import pi
 
 from jax import Array, numpy as jnp
@@ -51,7 +51,8 @@ class A_to_B:
 
         self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
         self.car_ctrl:        Callable[[Array], Array] = options.car_ctrl
-        self.arm_ctrl:        Callable[[Array], Array] = options.arm_ctrl
+        self.arm_ctrl:        Callable[[Array, Array], Array] = partial(options.arm_ctrl, self.decode_observation)
+        self.gripper_ctrl:    Callable[[Array], Array] = options.gripper_ctrl 
         self.goal_radius:     float = options.goal_radius 
         # self.num_envs:        int = options.num_envs # TODO: remove num_envs as argument and from options
         self.steps_per_ctrl:  int = options.steps_per_ctrl
@@ -96,7 +97,7 @@ class A_to_B:
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
-        observation, _, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
+        observation, _, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
     
         return (mjx_data, p_goal), observation, self.null_reward, done
 
@@ -127,23 +128,29 @@ class A_to_B:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array]:
         car_orientation = self.get_car_orientation(mjx_data)
-        ctrl = self.compute_controls(car_orientation, action)
+        observation = self.observe(mjx_data, p_goal)
+        ctrl = self.compute_controls(car_orientation, observation, action)
         mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
-        observation, reward, done, p_goal = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
+        observation, reward, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
 
         return (mjx_data, p_goal), observation, reward, done  
     
-    def compute_controls(self, car_orientation: Array, action: Array) -> Array:
+    # TODO: I want to incorporate multiple step controllers
+    def compute_controls(self, car_orientation: Array, observation: Array, action: Array) -> Array:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)                                     
+
+        ctrl_arm = self.arm_ctrl(observation, a_arm)
+        ctrl_gripper = self.gripper_ctrl(a_gripper) 
+
         car_local_ctrl = self.car_ctrl(a_car)                                                                                   
         ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
-        ctrl_arm = self.arm_ctrl(a_arm)
-        ctrl_gripper = self.gripper_ctrl(a_gripper) 
+
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
         return ctrl
 
+    # TODO: for multi step controllers I need to use compute_controls or precompute controls and use ctrl as xs in scan
     def n_step(self, mjx_model: Model, mjx_data: Data, ctrl: Array) -> Data:
 
         def f(carry: Data, _):
@@ -153,10 +160,10 @@ class A_to_B:
         final, _ = jax.lax.scan(f, mjx_data, None, length=self.steps_per_ctrl)
         return final
     
-    def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array]:
+    def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
         (q_car, q_arm, q_gripper, 
          q_ball, qd_car, qd_arm, 
-         qd_gripper, qd_ball, p_goal) = self.decode_observation(observation)                     
+         qd_gripper, pd_ball, p_goal) = self.decode_observation(observation)                     
 
         car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max)                          
         arm_outside_limits = self.outside_limits(qd_arm, minval=self.arm_limits.q_dot_min, maxval=self.arm_limits.q_dot_max)
@@ -166,8 +173,8 @@ class A_to_B:
         ball_outside_limits_y = self.outside_limits(q_ball[1:2], minval=self.car_limits.y_min, maxval=self.car_limits.y_max)        # type: ignore[assignment]
         ball_outside_limits_z = self.outside_limits(q_ball[2:3], minval=self.playing_area.z_min, maxval=self.playing_area.z_max)    # type: ignore[assignment]
 
-        car_goal_reached = self.car_goal_reached(q_car, p_goal)
-        arm_goal_reached = self.arm_goal_reached(q_car, q_ball)
+        car_goal_reached = self.car_goal_reached(q_car, p_goal) # car reaches goal
+        arm_goal_reached = self.arm_goal_reached(q_car, q_ball) # ball hits car
 
         car_goal_reward = 1.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)
         arm_goal_reward = 1.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)
@@ -182,7 +189,7 @@ class A_to_B:
         done = jnp.logical_or(car_goal_reached, arm_goal_reached)
         done = jnp.logical_or(done, jnp.logical_or(ball_outside_limits_x, jnp.logical_or(ball_outside_limits_y, ball_outside_limits_z)))
 
-        return observation, reward, done, p_goal
+        return observation, reward, done, p_goal, (car_goal_reached, arm_goal_reached, car_outside_limits, arm_outside_limits)
     # ---------------------------------------- end step ----------------------------------------- 
     # -------------------------------------------------------------------------------------------
     
@@ -193,8 +200,10 @@ class A_to_B:
         return mjx_data.qpos[self.car_orientation_index]                                                    
     
     def observe(self, mjx_data: Data, p_goal: Array) -> Array:
+        # Manually wrap angle
+        qpos = mjx_data.qpos.at[self.car_orientation_index].set(jnp.mod(mjx_data.qpos[self.car_orientation_index], 2*pi))
         return jnp.concatenate([                                                                                        
-            mjx_data.qpos,
+            qpos,
             mjx_data.qvel,
             p_goal
             ], axis=0)
@@ -208,10 +217,10 @@ class A_to_B:
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car],                                                                                                 
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm],                                                                     
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper],                                     
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball],    
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball-3],  # can't observe angular velocity of ball   
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball : ]                                                                                                             
                 )
-        # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal)
+        # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal)
 
     def decode_action(self, action: Array) -> tuple[Array, Array, Array]:
         return (
@@ -279,13 +288,13 @@ class A_to_B:
     def arm_goal_reached(self, q_car: Array, q_ball: Array) -> Array: # WARNING: hardcoded height
         return jnp.linalg.norm(jnp.stack([q_car[0], q_car[1], 0.1], axis=0) - q_ball[:3]) <= self.goal_radius 
 
-    def gripper_ctrl(self, action: Array) -> Array:
-        def grip() -> Array:
-            return jnp.array([0.02, -0.005, 0.02, -0.005], dtype=jnp.float32)                                      
-        def release() -> Array: 
-            return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)                                          
+    # def gripper_ctrl(self, action: Array) -> Array:
+    #     def grip() -> Array:
+    #         return jnp.array([0.02, -0.005, 0.02, -0.005], dtype=jnp.float32)                                      
+    #     def release() -> Array: 
+    #         return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)                                          
 
-        return jax.lax.cond(action[0] > 0.0, grip, release)
+    #     return jax.lax.cond(action[0] > 0.0, grip, release)
 
     def car_local_polar_to_global_cartesian(self, orientation: Array, magnitude: Array, angle: Array, omega: Array) -> Array:
         # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now

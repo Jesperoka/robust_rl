@@ -40,7 +40,7 @@
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
         <rgba haze="0.15 0.25 0.35 1" />
-        <global offwidth="3840" offheight="2160" />
+        <global offwidth="1920" offheight="1080" />
         <quality offsamples="8" />
     </visual>
 
@@ -67,6 +67,8 @@
             scale="0.0645 0.0645 0.0645" />
     </asset>
 
+    <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
+
     <include file="panda_extras.xml" />
 
     <custom>
@@ -79,10 +81,26 @@
         <light pos="0 0 2.5" dir="0 0 -1" directional="true" />
         <body name="ground" pos="0 0 0">
             <geom name="ground_surface" size="0 0 0.025" type="plane" material="groundplane"
-                friction="0.001" />
+                friction="0.001"/>
         </body>
 
-        <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
+        <body name="car_reward_board" pos="0.21 1.02 1.0">
+            <geom name="car_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" />
+            <body name="car_reward_indicator" pos="0 0 -1.0">
+                <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/>
+            </body>
+        </body>
+
+        <body name="arm_reward_board" pos="0.71 1.02 1.0">
+            <geom name="arm_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" />
+            <body name="arm_reward_indicator" pos="0 0 -1.0">
+                <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/>
+            </body>
+        </body>
+        
+        <body name="car_goal" pos="0 0 0.115">
+            <geom pos="0 0 0" size="0.1 0.005" type="cylinder" rgba="0.858824 0.556863 0.117647 1.0" />
+        </body>
 
         <body name="driving_surface" pos="1.1 0 0.0">
             <body name="driving_surface_top" pos="0 0 0.1">

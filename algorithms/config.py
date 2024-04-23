@@ -17,10 +17,7 @@ class AlgorithmConfig:
     clip_eps:        float = 0.25
     scale_clip_eps:  bool = False 
     ent_coef:        float = 0.01
-    vf_coef:         float = 0.5
+    vf_coef:         float = 1.0
     max_grad_norm:   float = 0.5
-    activation:      str = "tanh" 
     env_name:        str = "A_to_B"
-    seed:            int = 1
-    num_seeds:       int = 2
-    anneal_lr:       bool = True 
+    rnn_hidden_size: int = 32 

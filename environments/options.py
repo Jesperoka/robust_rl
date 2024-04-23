@@ -2,18 +2,22 @@
 from jax import Array
 from jax.numpy import ones, array, float32 
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Callable, Literal, TypeAlias
 from reproducibility_globals import PRNG_SEED 
 
+ObsDecodeFuncSig: TypeAlias = Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]]
 
 def passthrough(x: Array) -> Array:
     return x
+def passthrough_second(decode_obs: ObsDecodeFuncSig, x: Array, y: Array) -> Array:
+    return y
 
 @dataclass
 class EnvironmentOptions:
-    reward_fn:      Callable[[Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]], Array, Array], tuple[Array, Array]]
+    reward_fn:      Callable[[ObsDecodeFuncSig, Array, Array], tuple[Array, Array]]
     car_ctrl:       Callable[[Array], Array] = passthrough 
-    arm_ctrl:       Callable[[Array], Array] = passthrough
+    arm_ctrl:       Callable[[ObsDecodeFuncSig, Array, Array], Array] = passthrough_second
+    gripper_ctrl:   Callable[[Array], Array] = passthrough
     goal_radius:    float = 0.1     # m
     num_envs:       int = 1
     steps_per_ctrl: int = 1

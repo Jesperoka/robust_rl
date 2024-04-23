@@ -206,8 +206,8 @@ def actor_loss(
     def loss(gae, log_prob, minibatch_log_prob, pi):
         ratio = jnp.exp(log_prob - minibatch_log_prob)
         clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-        loss_actor = -jnp.minimum(ratio*gae, clipped_ratio*gae).mean(where=(1 - minibatch_done))
-        entropy = pi.entropy().mean(where=(1 - minibatch_done)) # type: ignore[attr-defined]
+        loss_actor = -jnp.minimum(ratio*gae, clipped_ratio*gae).mean() #.mean(where=(1 - minibatch_done))
+        entropy = pi.entropy().mean() #.mean(where=(1 - minibatch_done)) # type: ignore[attr-defined]
         actor_loss = loss_actor - ent_coef * entropy
 
         return actor_loss, entropy
@@ -239,7 +239,7 @@ def critic_loss(
         value_pred_clipped = minibatch_value + (value - minibatch_value).clip(-clip_eps, clip_eps)
         value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
         value_losses_unclipped = jnp.square(value - minibatch_target)
-        value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean(where=(1 - minibatch_done))
+        value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean() #.mean(where=(1 - minibatch_done))
 
         ### Without Value clipping
         # value_losses = 0.5 * jnp.square(value - minibatch_target).mean(where=(1 - minibatch_done))
@@ -541,7 +541,7 @@ if __name__=="__main__":
     from environments.A_to_B_jax import A_to_B
     from environments.options import EnvironmentOptions
     from environments.physical import ZeusLimits, PandaLimits
-    from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance
+    from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance, zero_reward
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, checkpoint_utils
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
@@ -588,10 +588,10 @@ if __name__=="__main__":
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
     num_envs = 4096
-    minibatch_size = 512 
+    minibatch_size = 128 
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = car_only_negative_distance,
+        reward_fn      = zero_reward,
         arm_ctrl       = arm_fixed_pose,
         gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.1,
@@ -609,21 +609,21 @@ if __name__=="__main__":
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
     config: AlgorithmConfig = AlgorithmConfig(
-        lr              = 1.0e-4,
+        lr              = 2.0e-3,
         num_envs        = num_envs,
-        num_env_steps   = 128, 
+        num_env_steps   = 20, 
         total_timesteps = 10*2_000_000, # 128*2_097_152,
-        update_epochs   = 4,
+        update_epochs   = 20,
         num_minibatches = num_envs // minibatch_size,
-        gamma           = 0.99,
+        gamma           = 0.90,
         gae_lambda      = 0.90,
         clip_eps        = 0.2,
         scale_clip_eps  = False,
-        ent_coef        = 0.0, # WARNING: NO ENTROPY
-        vf_coef         = 1.0e-3, # NOTE: better to normalize inputs to critics as well
-        max_grad_norm   = 0.5,
+        ent_coef        = 0.01,
+        vf_coef         = 1.0, 
+        max_grad_norm   = 1.0,
         env_name        = "A_to_B_jax",
-        rnn_hidden_size = 128 
+        rnn_hidden_size = 64 
     )
 
     config.num_actors = config.num_envs # env.num_agents * config.num_envs
@@ -633,16 +633,16 @@ if __name__=="__main__":
     print("\n\nconfig:\n\n")
     pprint(config)
 
-    rollout_fn = partial(rollout, env, model, data)
-    rollout_generator_fn = partial(rollout_generator, (model, 360, 640), Renderer, rollout_fn)
-    data_displayer_fn = partial(data_displayer, 360, 640, 48)
+    rollout_fn = partial(rollout, env, model, data, max_steps=1000)
+    rollout_generator_fn = partial(rollout_generator, (model, 900, 640), Renderer, rollout_fn)
+    data_displayer_fn = partial(data_displayer, 900, 640, 48)
     
     # Need to run rollout once to jit before multiprocessing
-    actors, _ = init_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], tuple(s.sample().shape[0] for s in env.act_spaces), config.lr, config.max_grad_norm, config.rnn_hidden_size)
-    actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in actors.train_states) # type: ignore
+    __actors, _ = init_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], tuple(s.sample().shape[0] for s in env.act_spaces), config.lr, config.max_grad_norm, config.rnn_hidden_size)
+    __actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in __actors.train_states) # type: ignore
 
     with jax.default_device(jax.devices("cpu")[1]):
-        _ = rollout_fn(FakeRenderer(360, 640), actors, max_steps=1)
+        _ = rollout_fn(FakeRenderer(900, 640), __actors, max_steps=1)
 
     data_display_queue = Queue()
     rollout_generator_queue = Queue()

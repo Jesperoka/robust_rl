@@ -158,7 +158,7 @@ class ZeusDimensions:
 
 @dataclass(frozen=True)
 class ZeusLimits:
-    # Orientation
+    # Orientation # WARNING: MuJoCo does NOT wrap angles, so we need to compute module ourselves
     theta_min:  float = 0.0     # rad
     theta_max:  float = 2*pi    # rad
     omega_min:  float = -1.0    # rad/s
@@ -177,3 +177,19 @@ class ZeusLimits:
     # Actuation
     a_min:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_min, ZeusLimits.omega_min], dtype=float))
     a_max:  Array = field(default_factory=lambda:array([1.0, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))
+
+
+
+if __name__ == "__main__":
+    from pprint import pprint
+    print("\n\nPlayingArea: ")
+    pprint(PlayingArea())
+    print("\n\nPandaLimits: ")
+    pprint(PandaLimits())
+    print("\n\nHandLimits: ")
+    pprint(HandLimits())
+    print("\n\nZeusLimits: ")
+    pprint(ZeusLimits())
+    print("\n\nZeusDimensions: ")
+    pprint(ZeusDimensions())
+

@@ -13,7 +13,8 @@ from matplotlib import pyplot as plt
 
 from pprint import pprint
 
-SCENE = "mujoco_models/scene_with_balls_rack.xml"
+# SCENE = "mujoco_models/scene_with_balls_rack.xml"
+SCENE = "mujoco_models/scene.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
 jax.config.update("jax_compilation_cache_dir", COMPILATION_CACHE_DIR)
@@ -40,7 +41,16 @@ if __name__ == "__main__":
     data = mj.MjData(model)                 # type: ignore[attr-defined]
     mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
-    # viewer = mujoco.viewer.launch(model, data)
+
+    body = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_goal"))
+    body_2 = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_reward_indicator"))
+    body.pos = np.array([1.0, 0.0, 0.115])
+    body_2.pos[2] = -0.0
+    pprint(body.pos)
+    pprint(body.ipos)
+    # pprint(dir(body))
+    viewer = mujoco.viewer.launch(model, data)
+    exit()
 
     mjx_model = mjx.put_model(model)
     mjx_data = mjx.make_data(model)
