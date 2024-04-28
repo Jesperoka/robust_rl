@@ -53,7 +53,7 @@ class A_to_B:
         self.grip_site_id: int = grip_site_id
 
         self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
-        self.car_ctrl:        Callable[[Array], Array] = options.car_ctrl
+        self.car_ctrl:        Callable[[Array, Array], Array] = partial(options.car_ctrl, self.decode_observation)
         self.arm_ctrl:        Callable[[Array, Array], Array] = partial(options.arm_ctrl, self.decode_observation)
         self.gripper_ctrl:    Callable[[Array], Array] = options.gripper_ctrl 
         self.goal_radius:     float = options.goal_radius 
@@ -186,22 +186,23 @@ class A_to_B:
         ctrl_arm = self.arm_ctrl(observation, a_arm)
         ctrl_gripper = self.gripper_ctrl(a_gripper) 
 
-        car_local_ctrl = self.car_ctrl(a_car)                                                                                   
-        ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
+        car_local_ctrl = self.car_ctrl(observation, a_car)                                                                                   
+        # ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
+        ctrl_car = car_local_ctrl
 
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
         return ctrl
 
     # TODO: for multi step controllers I need to use compute_controls or precompute controls and use ctrl as xs in scan
-    def n_step(self, mjx_model: Model, mjx_data: Data, ctrl: Array) -> Data:
+    def n_step(self, mjx_model: Model, init_mjx_data: Data, ctrl: Array) -> Data:
 
-        def f(carry: Data, _):
-            carry = mjx_step(mjx_model, mjx_data.replace(ctrl=ctrl))
-            return carry, _ 
+        def f(mjx_data: Data, _):
+            mjx_data = mjx_step(mjx_model, mjx_data.replace(ctrl=ctrl))
+            return mjx_data, _ 
 
-        final, _ = jax.lax.scan(f, mjx_data, None, length=self.steps_per_ctrl)
-        return final
+        final_mjx_data, _ = jax.lax.scan(f, init_mjx_data, None, length=self.steps_per_ctrl)
+        return final_mjx_data
     
     def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
         (q_car, q_arm, q_gripper, 
@@ -360,10 +361,10 @@ class A_to_B:
 
 def main():
     import matplotlib.pyplot as plt
-    from matplotlib.animation import ArtistAnimation
+    from matplotlib.animation import FuncAnimation 
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx, MjvCamera, Renderer, mj_forward # type: ignore[import]
     from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance, zero_reward 
-    from inference.controllers import arm_PD, gripper_ctrl, arm_fixed_pose, gripper_always_grip 
+    from inference.controllers import arm_PD, gripper_ctrl, arm_fixed_pose, gripper_always_grip, car_fixed_pose 
     from algorithms.utils import FakeTrainState, ActorInput, init_actors, actor_forward
     from algorithms.mappo_jax import step_and_reset_if_done
 
@@ -385,6 +386,7 @@ def main():
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
+        car_ctrl       = car_fixed_pose,
         arm_ctrl       = arm_fixed_pose,
         gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.1,
@@ -403,7 +405,7 @@ def main():
 
     # pdb.set_trace()
 
-    renderer = Renderer(model, height=1080, width=1920)
+    renderer = Renderer(model, height=720, width=1080)
     cam = MjvCamera()
     cam.elevation = -35
     cam.azimuth = 110
@@ -424,10 +426,13 @@ def main():
 
     frames = []
     fig, ax = plt.subplots()
-    ax.imshow(renderer.render(), animated=True)
+    img = ax.imshow(renderer.render(), animated=True)
 
-    for rollout in range(16):
-        print("rollout:", rollout)
+    num_rollouts = 1
+    num_env_steps = 100 
+
+    for rollout in range(num_rollouts):
+        print("rollout:", rollout, "of", num_rollouts)
 
         rng, rng_r, rng_a = jax.random.split(rng, 3)
 
@@ -441,11 +446,10 @@ def main():
 
         data = mjx.get_data(model, mjx_data)
         renderer.update_scene(data, camera=cam)
-        frames.append(renderer.render())
 
 
-        for env_step in range(150):
-            print("env_step:", env_step)
+        for env_step in range(num_env_steps):
+            print("env_step:", env_step, "of", num_env_steps)
 
             rng_a, *action_rngs = jax.random.split(rng_a, env.num_agents+1)
             reset_rngs = rng_r #jax.random.split(rng_r, num_envs)
@@ -476,20 +480,29 @@ def main():
             car_reward, arm_reward = rewards
             mjx_data, p_goal = environment_state
 
+            # print(mjx.get_data(model, mjx_data))
+            # jax.debug.print("mjx_data.contact {con}", con=mjx_data.contact)
+            jax.debug.print("mjx_data.ctrl {ctrl}", ctrl=mjx_data.ctrl)
+
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = jnp.concatenate((p_goal, jnp.array([0.115])), axis=0)  # goal visualization
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = jnp.clip(1.4142136*car_reward + 1.0, -1.05, 1.05)
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = jnp.clip(arm_reward, -1.05, 1.05)
-            data = mjx.get_data(model, mjx_data)
-            mj_forward(model, data)
+            # mj_forward(model, data)
 
+            data = mjx.get_data(model, mjx_data)
             renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())
 
-    anim = ArtistAnimation(fig, frames, interval=42, repeat_delay=1000)
-    plt.show()
-
     renderer.close()
 
+    def update(i):
+        img.set_array(frames[i % len(frames)])
+        return img,
+
+    print("num frames: ", len(frames))
+
+    anim = FuncAnimation(fig, update, frames=len(frames), interval=42, blit=True, repeat=True, cache_frame_data=False)
+    plt.show()
 
 
 

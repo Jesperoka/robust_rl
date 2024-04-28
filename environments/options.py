@@ -15,7 +15,7 @@ def passthrough_second(decode_obs: ObsDecodeFuncSig, x: Array, y: Array) -> Arra
 @dataclass
 class EnvironmentOptions:
     reward_fn:      Callable[[ObsDecodeFuncSig, Array, Array], tuple[Array, Array]]
-    car_ctrl:       Callable[[Array], Array] = passthrough 
+    car_ctrl:       Callable[[ObsDecodeFuncSig, Array, Array], Array] = passthrough_second
     arm_ctrl:       Callable[[ObsDecodeFuncSig, Array, Array], Array] = passthrough_second
     gripper_ctrl:   Callable[[Array], Array] = passthrough
     goal_radius:    float = 0.1     # m
