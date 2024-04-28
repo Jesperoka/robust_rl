@@ -5,7 +5,7 @@ from jax import Array
 from jax.numpy import array, float32, clip
 from jax.lax import cond
 from environments.options import ObsDecodeFuncSig
-from environments.physical import PandaLimits
+from environments.physical import PandaLimits, ZeusLimits
 
 # Just for LSP to see function signatures during development
 # ----------------------------------------------------------------------------------------------------
@@ -18,12 +18,12 @@ if ______: assert not ______; from environments.A_to_B_jax import A_to_B; A_to_B
 KP = 80.0
 KD = 5.0
 
-def car_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, kp: float=0.01*KP, kd: float=0.1*KD) -> Array:
+def car_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, kp: float=KP, kd: float=KD) -> Array:
     (q_car, _, _, _, qd_car, _, _, _, _) = decode_obs(obs)
     
     v_x_y_omega = kp*(a_car - q_car) + kd*(0.0 - qd_car)
 
-    return v_x_y_omega 
+    return clip(v_x_y_omega, array([-1, -1, -1]), array([1, 1, 1]))
 
 def car_fixed_pose(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, pose: Array=array([1.1, 0.0, 0.0]), kp: float=KP, kd: float=KD) -> Array:
     tau = car_PD(decode_obs, obs, pose, kp, kd)
