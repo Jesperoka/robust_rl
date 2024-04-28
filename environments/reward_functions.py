@@ -20,39 +20,52 @@ def zero_reward(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[A
 
 def inverse_distance(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, q_ball, _, _, _, _, p_goal) = decode_obs(obs)                     
-    zeus_dist_reward = clip(1.0/(norm(q_car[0:2] - p_goal[0:2]) + 1.0), MIN_REWARD, MAX_REWARD)
-    panda_dist_reward = clip(1.0/(norm(q_ball[0:3] - concatenate([q_car[0:2], array([0.23])], axis=0)) + 1.0), MIN_REWARD, MAX_REWARD) 
+    zeus_dist_reward = clip(1.0/(norm(q_car[0:2] - p_goal[0:2], ord=2) + 1.0), MIN_REWARD, MAX_REWARD)
+    panda_dist_reward = clip(1.0/(norm(q_ball[0:3] - concatenate([q_car[0:2], array([0.23])], axis=0), ord=2) + 1.0), MIN_REWARD, MAX_REWARD) 
 
     return zeus_dist_reward, panda_dist_reward
 
 def car_only_inverse_distance(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, _, _, _, _, _, p_goal) = decode_obs(obs)                     
-    zeus_dist_reward = clip(1.0/(norm(q_car[0:2] - p_goal[0:2]) + 1.0), MIN_REWARD, MAX_REWARD)
+    zeus_dist_reward = clip(1.0/(norm(q_car[0:2] - p_goal[0:2], ord=2) + 1.0), MIN_REWARD, MAX_REWARD)
 
     return zeus_dist_reward, array(0.0, dtype=float32) 
 
 def arm_only_inverse_distance(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, q_ball, _, _, _, _, _) = decode_obs(obs)                     
-    panda_dist_reward = clip(1.0/(norm(q_ball[0:3] - concatenate([q_car[0:2], array([0.23])], axis=0)) + 1.0), MIN_REWARD, MAX_REWARD) 
+    panda_dist_reward = clip(1.0/(norm(q_ball[0:3] - concatenate([q_car[0:2], array([0.23])], axis=0), ord=2) + 1.0), MIN_REWARD, MAX_REWARD) 
 
     return array(0.0, dtype=float32), panda_dist_reward
 
 def car_only_negative_distance(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, _, _, _, _, _, p_goal) = decode_obs(obs)                     
-    zeus_dist_reward = -1.0*norm(q_car[0:2] - p_goal[0:2])
+    zeus_dist_reward = -1.0*norm(q_car[0:2] - p_goal[0:2], ord=2)
 
     return zeus_dist_reward, array(0.0, dtype=float32) 
+
+def car_only_negative_distance_squared(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
+    (q_car, _, _, _, _, _, _, _, p_goal) = decode_obs(obs)                     
+    zeus_dist_reward = -1.0*norm(q_car[0:2] - p_goal[0:2], ord=2)**2
+
+    return zeus_dist_reward, array(0.0, dtype=float32)
 
 # this is just to check for sign error
 def minus_car_only_negative_distance(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, _, _, _, _, _, p_goal) = decode_obs(obs)                     
-    zeus_dist_reward = 0.1*norm(q_car[0:2] - p_goal[0:2])
+    zeus_dist_reward = 1.0*norm(q_car[0:2] - p_goal[0:2], ord=2)
 
     return zeus_dist_reward, array(0.0, dtype=float32) 
 
 def car_only_velocity_towards_goal(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
     (q_car, _, _, _, qd_car, _, _, _, p_goal) = decode_obs(obs)                     
     delta = p_goal - q_car[0:2]
-    zeus_vel_reward = norm(qd_car[0:2]) + dot(qd_car[0:2], delta)/(norm(delta) + 1.0)
+    zeus_vel_reward = dot(qd_car[0:2], delta)/(norm(delta, ord=2) + 1.0)
+
+    return zeus_vel_reward, array(0.0, dtype=float32)
+
+def car_reward(decode_obs: ObsDecodeFuncSig, obs: Array, act: Array) -> tuple[Array, Array]:
+    (q_car, _, _, _, qd_car, _, _, _, p_goal) = decode_obs(obs)                     
+    delta = p_goal - q_car[0:2]
+    zeus_vel_reward = 1.0*dot(qd_car[0:2], delta)/(norm(delta, ord=2) + 1.0) - 1.0*norm(q_car[0:2] - p_goal[0:2], ord=2)
 
     return zeus_vel_reward, array(0.0, dtype=float32)

@@ -21,8 +21,9 @@ class EnvironmentOptions:
     goal_radius:    float = 0.1     # m
     num_envs:       int = 1
     steps_per_ctrl: int = 1
+    time_limit:     float = 5.0     # s
     prng_seed:      int = PRNG_SEED
-    null_reward:    tuple[Array, Array] = field(default_factory=lambda: (array(0.0, dtype=float32), array(0.0, dtype=float32)))
+    null_reward:    tuple[Array, Array] = field(default_factory=lambda: (array(0.0, dtype=float32), array(0.0, dtype=float32))) # TODO: remove
     agent_ids:      tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
     obs_min:        Array = field(default_factory=lambda: -3.5*ones(39, dtype=float32))
     obs_max:        Array = field(default_factory=lambda: 3.5*ones(39, dtype=float32))

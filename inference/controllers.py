@@ -2,7 +2,7 @@
 # NOTE: if I want to make an MPC controller I need to couple it via n_step() as well
 
 from jax import Array 
-from jax.numpy import array, float32 
+from jax.numpy import array, float32, clip
 from jax.lax import cond
 from environments.options import ObsDecodeFuncSig
 from environments.physical import PandaLimits
@@ -15,8 +15,8 @@ if ______: assert not ______; from environments.A_to_B_jax import A_to_B; A_to_B
 
 # decode_obs -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, qd_ball, p_goal)
 
-KP = 100.0
-KD = 20.0
+KP = 80.0
+KD = 5.0
 
 def car_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, kp: float=0.01*KP, kd: float=0.1*KD) -> Array:
     (q_car, _, _, _, qd_car, _, _, _, _) = decode_obs(obs)
@@ -35,7 +35,7 @@ def arm_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_arm: Array, kp: float=KP,
     
     tau = kp*(a_arm - q_arm) + kd*(0.0 - qd_arm) 
 
-    return tau
+    return clip(tau, PandaLimits().tau_min, PandaLimits().tau_max)
 
 def arm_fixed_pose(decode_obs: ObsDecodeFuncSig, obs: Array, a_arm: Array, pose: Array=PandaLimits().q_start, kp: float=KP, kd: float=KD) -> Array:
     tau = arm_PD(decode_obs, obs, pose, kp, kd)

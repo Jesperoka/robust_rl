@@ -6,14 +6,14 @@ from mujoco import MjModel, MjData, MjvCamera, Renderer, mj_resetData, mj_step, 
 
 from functools import partial
 from numpy import ndarray, zeros 
-from jax import Array, jit 
+from jax import Array, jit, tree_map
 from jax.random import PRNGKey as _PRNGKey, split as _split
 from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis, pi
 from jax.numpy.linalg import norm as _norm
 from jax.lax import slice as _slice
 
 from reproducibility_globals import PRNG_SEED
-from algorithms.utils import ScannedRNN, multi_actor_forward, MultiActorRNN
+from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN
 from environments.A_to_B_jax import A_to_B
 
 
@@ -51,6 +51,9 @@ global_cam.lookat = array_cpu([1.1, 0.0, 4.0])
 global_cam.distance = 5.00
 
 
+def actor_forward(network, params, hstate, input, running_stats):
+    return network.apply(params, hstate, input, running_stats)
+
 # WARNING: needs to be kept up-to-date with environment observe() method
 def observe(data: MjData, p_goal) -> ndarray:
     qpos = array_cpu(data.qpos).at[2].set(mod_cpu(data.qpos[2], 2.0*pi))
@@ -76,6 +79,8 @@ def _reset_cpu(
     global_rng, qpos, qvel = jit_reset_car_arm_and_gripper(global_rng)
     data.qpos = qpos
     data.qvel = qvel
+    data.ctrl = zeros(data.ctrl.shape)
+    data.time = 0.0
     mj_forward(model, data)
 
     grip_site = data.site_xpos[grip_site_id]
@@ -101,7 +106,7 @@ def rollout(
         data: MjData, 
         renderer: Renderer | FakeRenderer, 
         actors: MultiActorRNN, 
-        max_steps: int = 1000,
+        max_steps: int = 500,
         fps: float = 24.0
         ) -> list[ndarray]:
 
@@ -109,7 +114,8 @@ def rollout(
     dt = model.opt.timestep
 
     # Setup functions for CPU inference
-    jit_multi_actor_forward = jit(multi_actor_forward, backend="cpu")
+    jit_actor_forward = jit(actor_forward, backend="cpu")
+    # jit_multi_actor_forward = jit(multi_actor_forward, backend="cpu")
     jit_decode_observation = jit(env.decode_observation, backend="cpu")
     jit_reset_car_arm_and_gripper = jit(env.reset_car_arm_and_gripper, backend="cpu")
     jit_reset_ball_and_goal = jit(env.reset_ball_and_goal, backend="cpu")
@@ -131,8 +137,10 @@ def rollout(
     init_actor_hidden_states = tuple(dummy_actor_hstate for _ in range(env.num_agents))
     actor_hidden_states = tuple(copy_cpu(dummy_actor_hstate) for _ in range(env.num_agents))
 
+    _step = 0
+
     # Rollout
-    for step in range(max_steps):
+    for env_step in range(max_steps):
 
         if done: # Reset logic
 
@@ -140,6 +148,10 @@ def rollout(
 
             model, data, p_goal = reset_cpu(model, data)
             mj_step(model, data)
+
+            if _step % (1.0/(fps*dt)) <= 9.0e-1:
+                renderer.update_scene(data, global_cam)
+                frames.append(renderer.render())
 
             observation = observe(data, p_goal)
             (q_car, _, _, p_ball, _, _, _, _, p_goal) = jit_decode_observation(observation)
@@ -151,13 +163,25 @@ def rollout(
                     or p_ball[2] < env.playing_area.z_min
             ])
 
+            _step += 1
+
         else: # Step logic
 
-            inputs = tuple((observation[newaxis, :][newaxis, :], done[newaxis, :]) for _ in range(env.num_agents))
-            actors, policies, actor_hidden_states = jit_multi_actor_forward(actors, inputs, actor_hidden_states)
-            rngs = split_cpu(global_rng, env.num_agents)
+            actor_inputs = tuple((observation[newaxis, :][newaxis, :], done[newaxis, :]) for _ in range(env.num_agents))
 
-            actions = tuple(policy.sample(seed=rng).squeeze() for rng, policy in zip(rngs, policies))
+            network_params = tree_map(lambda ts: ts.params, actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
+    
+            actor_hidden_states, policies, actors.running_stats = zip(*tree_map(jit_actor_forward, 
+                    actors.networks,
+                    network_params,
+                    actor_hidden_states,
+                    actor_inputs,
+                    actors.running_stats,
+                    is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+            ))
+
+            action_rngs = split_cpu(global_rng, env.num_agents)
+            actions = tuple(policy.sample(seed=rng).squeeze() for rng, policy in zip(action_rngs, policies))
             environment_action = concatenate_cpu(actions, axis=-1)
 
             car_orientation = get_car_orientation(data)
@@ -176,12 +200,14 @@ def rollout(
 
             done = array_cpu([done])
 
-            mj_step(model, data)
+            for step in range(env.steps_per_ctrl):
+                mj_step(model, data)
+                if _step % (1.0/(fps*dt)) <= 9.0e-1:
+                    renderer.update_scene(data, global_cam)
+                    frames.append(renderer.render())
 
-        # Rendering
-        renderer.update_scene(data, global_cam)
-        if step % (1.0/(fps*dt)) <= 9.0e-1:
-            frames.append(renderer.render())
+                _step += 1
+
         
     return frames
 

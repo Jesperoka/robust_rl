@@ -21,3 +21,4 @@ class AlgorithmConfig:
     max_grad_norm:   float = 0.5
     env_name:        str = "A_to_B"
     rnn_hidden_size: int = 32 
+    rnn_fc_size:     int = 256 
