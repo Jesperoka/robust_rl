@@ -256,7 +256,7 @@ if __name__ == "__main__":
     from environments.options import EnvironmentOptions 
     from environments.reward_functions import zero_reward, car_only_negative_distance
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import arm_fixed_pose, gripper_always_grip
+    from inference.controllers import arm_fixed_pose, gripper_always_grip, car_fixed_pose
     from algorithms.utils import init_actors, FakeTrainState
     import jax.numpy as jnp
 
@@ -276,10 +276,11 @@ if __name__ == "__main__":
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
+        car_ctrl       = car_fixed_pose,
         arm_ctrl       = arm_fixed_pose,
         gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.1,
-        steps_per_ctrl = 1,
+        steps_per_ctrl = 20,
         num_envs       = num_envs,
         act_min        = jnp.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, jnp.array([-1.0])], axis=0),
         act_max        = jnp.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, jnp.array([1.0])], axis=0)
@@ -352,7 +353,7 @@ if __name__ == "__main__":
 
     # we cannot shadow the names of the functions, since they are pickled by multiprocessing Process() with spawn() strategy
     _rollout_generator = partial(rollout_generator, (model, 900, 640), Renderer, _rollout_fn)    # type: ignore
-    _data_displayer = partial(data_displayer, 900, 640, 12)             # type: ignore
+    _data_displayer = partial(data_displayer, 900, 640, 126)             # type: ignore
 
     data_display_queue = multiprocessing.Queue()
     rollout_generator_queue = multiprocessing.Queue(maxsize=1)

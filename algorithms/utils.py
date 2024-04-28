@@ -305,7 +305,7 @@ class MultiCriticRNN:
 
 
 # Convenience function for initializing actors, useful for checkpoint restoring (e.g. before inference)
-def init_actors(
+def initialize_actors(
         actor_rngs: Iterable[KeyArray], 
         num_envs: int, 
         num_agents: int,
@@ -327,9 +327,6 @@ def init_actors(
     actor_network_params = tuple(network.init(rng, dummy_hstate, dummy_actor_input, dummy_stats) 
                                  for rng, network, dummy_hstate, dummy_stats in zip(actor_rngs, actor_networks, dummy_actor_hstates, dummy_statistics))
 
-    # debug.print("actor_network_params[0]: {p}", p=actor_network_params[0])
-    # debug.print("actor_network_params[1]: {p}", p=actor_network_params[1])
-
     actors = MultiActorRNN(
         num_actors=num_agents,
         rnn_hidden_size=rnn_hidden_size,
@@ -346,7 +343,7 @@ def init_actors(
     return actors, dummy_actor_hstates 
 
 # Convenience function for initializing critics, useful for checkpoint restoring
-def init_critics(
+def initialize_critics(
         critic_rngs: Iterable[KeyArray],
         num_envs: int, 
         num_agents: int,
@@ -380,9 +377,6 @@ def init_critics(
     critic_network_params = tuple(network.init(rng, dummy_hstate, dummy_critic_input, dummy_stats) 
                                   for rng, network, dummy_hstate, dummy_critic_input, dummy_stats in zip(critic_rngs, critic_networks, dummy_critic_hstates, dummy_critic_inputs, dummy_statistics))
 
-    # debug.print("critic_network_params[0]: {p}", p=critic_network_params[0])
-    # debug.print("critic_network_params[1]: {p}", p=critic_network_params[1])
-
     critics = MultiCriticRNN(
         num_critics=num_agents,
         rnn_hidden_size=rnn_hidden_size,
@@ -397,41 +391,3 @@ def init_critics(
     )
 
     return critics, dummy_critic_hstates 
-
-
-
-# TODO: delete these functions and use jax.tree_map directly (need to jit in inference.sim still)
-
-# # Convenience function for forward pass of all actors
-# def multi_actor_forward(
-#         actors: MultiActorRNN,
-#         inputs: tuple[tuple[Array, Array], ...], 
-#         hidden_states: tuple[Array, ...],
-#         ) -> tuple[MultiActorRNN, tuple[Distribution, ...], tuple[Array, ...]]:
-
-#     network_params = tuple(train_state.params for train_state in actors.train_states)
-
-#     hidden_states, policies, actors.running_stats = zip(*(
-#          network.apply(params, hstate, input, running_stats) 
-#          for network, params, hstate, input, running_stats
-#          in zip(actors.networks, network_params, hidden_states, inputs, actors.running_stats)
-#     ))
-
-#     return actors, policies, hidden_states
-
-# # # Convenience function for forward pass of all critics 
-# def multi_critic_forward(
-#         critics: MultiCriticRNN,
-#         inputs: tuple[tuple[Array, Array], ...],
-#         hidden_states: tuple[Array, ...],
-#         ) -> tuple[MultiCriticRNN, tuple[Array, ...], tuple[Array, ...]]:
-
-#     network_params = tuple(train_state.params for train_state in critics.train_states)
-
-#     hidden_states, values, critics.running_stats = zip(*(
-#          network.apply(params, hstate, input, running_stats) 
-#          for network, params, hstate, input, running_stats
-#          in zip(critics.networks, network_params, hidden_states, inputs, critics.running_stats)
-#     ))
-
-#     return critics, tuple(map(squeeze, values)), hidden_states
