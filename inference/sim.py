@@ -68,37 +68,22 @@ def _reset_cpu(
         ) -> tuple[MjModel, MjData, Array, Array]:
 
     rng, qpos, qvel = jit_reset_car_arm_and_gripper(rng)
-
-    print("0_qvel:",data.qvel)
-
     data.qpos = qpos
     data.qvel = qvel
     data.ctrl = zeros(data.ctrl.shape)
     data.time = 0.0
-
-    print("01_qvel:",data.qvel)
-
     mj_forward(model, data)
-
-    print("1_qvel:",data.qvel)
     
     grip_site = data.site_xpos[grip_site_id]
     rng, q_ball, qd_ball, p_goal = jit_reset_ball_and_goal(rng, grip_site)                                     
     qpos = concatenate_cpu((slice_cpu(qpos, 0, -nq_ball), q_ball), axis=0)                                   
     qvel = concatenate_cpu((slice_cpu(qvel, 0, -nv_ball), qd_ball), axis=0)                                  
-
-    print("2_qvel:",qvel)
-
     data.qpos = qpos
     data.qvel = qvel
-    
-    print("21_qvel:", data.qvel)
 
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = -1.0
     mj_forward(model, data)
-
-    print("3_qvel:", data.qvel)
 
     return model, data, p_goal, rng
 
@@ -195,9 +180,6 @@ def rollout(
 
             actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
-
-            # BUG: testing actions
-            environment_action = environment_action.at[0:3].set(array_cpu([0.0, 0.0, -0.2]))
 
             car_orientation = get_car_orientation(data)
             observation = observe(data, p_goal)

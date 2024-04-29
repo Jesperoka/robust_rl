@@ -119,9 +119,6 @@ class A_to_B:
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: Array, mjx_data: Data) -> tuple[tuple[Data, Array], Array]:
         rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       
-
-        jax.debug.print("0_mjx qvel: {qvel}", qvel=mjx_data.qvel)
-
         mjx_data = mjx_forward(
                 self.mjx_model, 
                 mjx_data.replace(
@@ -134,21 +131,15 @@ class A_to_B:
                     # act_dot=jnp.zeros(self.mjx_model.na)
         ))
 
-        jax.debug.print("1_mjx qvel: {qvel}", qvel=mjx_data.qvel)
-
         grip_site = mjx_data.site_xpos[self.grip_site_id]
         rng, q_ball, qd_ball, p_goal = self.reset_ball_and_goal(rng, grip_site)                                     
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
     
-        jax.debug.print("2_mjx qvel: {qvel}", qvel=qvel)
-
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
         observation = self.observe(mjx_data, p_goal)
         # observation, _, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
 
-        jax.debug.print("3_mjx qvel: {qvel}", qvel=mjx_data.qvel)
-    
         return (mjx_data, p_goal), observation 
 
     def reset_car_arm_and_gripper(self, rng: Array) -> tuple[Array, Array, Array]:
@@ -359,8 +350,8 @@ class A_to_B:
         velocity_y = velocity*jnp.sin(angle)
 
         return jnp.stack([
-            velocity_x*jnp.cos(orientation) + velocity_y*jnp.sin(orientation), 
-            -velocity_x*jnp.sin(orientation) + velocity_y*jnp.cos(orientation),                                       
+            velocity_x*jnp.cos(orientation) - velocity_y*jnp.sin(orientation), 
+            velocity_x*jnp.sin(orientation) + velocity_y*jnp.cos(orientation),                                       
             omega
             ], axis=0)
     # ------------------------------------- end subroutines -------------------------------------
@@ -482,7 +473,8 @@ def main():
             actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = jnp.concatenate(actions, axis=-1)
 
-            environment_action = environment_action.at[0:3].set(jnp.array([0.0, 0.0, -0.2]))
+            # NOTE: for testing actions
+            # environment_action = environment_action.at[0:3].set(jnp.array([0.0, -0.5, 0.0]))
             
             environment_state, observation, terminal_observation, rewards, done, truncate = jit_step_and_reset_if_done(reset_rngs, environment_state, environment_action)
             done = done[jnp.newaxis]
@@ -490,10 +482,6 @@ def main():
 
             car_reward, arm_reward = rewards
             mjx_data, p_goal = environment_state
-
-            # print(mjx.get_data(model, mjx_data))
-            # jax.debug.print("mjx_data.contact {con}", con=mjx_data.contact)
-            # jax.debug.print("mjx_data.ctrl {ctrl}", ctrl=mjx_data.ctrl)
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = jnp.concatenate((p_goal, jnp.array([0.115])), axis=0)  # goal visualization
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = jnp.clip(1.4142136*car_reward + 1.0, -1.05, 1.05)
