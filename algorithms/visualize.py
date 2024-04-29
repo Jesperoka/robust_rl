@@ -242,8 +242,8 @@ def final_data_plot(final_metrics: dict, pixel_width: int, pixel_height: int, sc
     return fig, axes
 
 
-# Example of how to use
-if __name__ == "__main__":
+
+def main():
     import multiprocessing
     multiprocessing.set_start_method('spawn')
 
@@ -257,8 +257,10 @@ if __name__ == "__main__":
     from environments.reward_functions import zero_reward, car_only_negative_distance
     from inference.sim import rollout, FakeRenderer
     from inference.controllers import arm_fixed_pose, gripper_always_grip, car_fixed_pose
-    from algorithms.utils import init_actors, FakeTrainState
+    from algorithms.utils import initialize_actors, FakeTrainState
+    from jax import tree_map
     import jax.numpy as jnp
+
 
     import pdb
 
@@ -276,7 +278,7 @@ if __name__ == "__main__":
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
-        car_ctrl       = car_fixed_pose,
+        # car_ctrl       = car_fixed_pose,
         arm_ctrl       = arm_fixed_pose,
         gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.1,
@@ -294,7 +296,7 @@ if __name__ == "__main__":
             with default_device(devices("cpu")[0]):
                 print("Training loop started")
 
-                _actors, _ = init_actors(actor_rngs, num_envs, env.num_agents, env.obs_space.sample().shape[0], tuple(s.sample().shape[0] for s in env.act_spaces), 0.1, 0.5, 128, 128)
+                _actors, _ = initialize_actors(actor_rngs, num_envs, env.num_agents, env.obs_space.sample().shape[0], tuple(s.sample().shape[0] for s in env.act_spaces), 0.1, 0.5, 128, 128)
                 _actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in _actors.train_states)
                 # _actors = None
 
@@ -342,14 +344,33 @@ if __name__ == "__main__":
     _rollout_fn = partial(rollout, env, model, data)
     _rollout_fn = partial(_rollout_fn, max_steps=250)
 
-    actors, _ = init_actors(actor_rngs, num_envs, env.num_agents, env.obs_space.sample().shape[0], tuple(s.sample().shape[0] for s in env.act_spaces), 0.1, 0.5, 128, 128)
+    lr = 3.0e-4
+    max_grad_norm = 0.5
+    rnn_hidden_size = 32
+    rnn_fc_size = 256
+    
+    act_sizes = tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
+    actors, _ = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
     actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in actors.train_states)
 
     with default_device(devices("cpu")[1]):
         print("Running rollout")
-        r_frames = _rollout_fn(FakeRenderer(900, 640), actors, max_steps=1)
-        # r_frames = _rollout_fn(Renderer(model, 500, 640), actors, max_steps=2000)
+        # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, max_steps=250)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), actors, max_steps=250)
         print("Rollout finished with ", len(r_frames), " frames")
+
+        from matplotlib.animation import FuncAnimation
+        fig, ax = plt.subplots()
+        img = ax.imshow(r_frames[0], animated=True)
+
+        def update(i):
+            img.set_array(r_frames[i % len(r_frames)])
+            return img,
+
+        anim = FuncAnimation(fig, update, frames=len(r_frames), interval=42, blit=True, repeat=True, cache_frame_data=False)
+        plt.show()
+
+    exit()
 
     # we cannot shadow the names of the functions, since they are pickled by multiprocessing Process() with spawn() strategy
     _rollout_generator = partial(rollout_generator, (model, 900, 640), Renderer, _rollout_fn)    # type: ignore
@@ -371,3 +392,8 @@ if __name__ == "__main__":
 
     rollout_generator_process.join()
     data_display_process.join()
+
+
+# Example of how to use
+if __name__ == "__main__":
+    main()

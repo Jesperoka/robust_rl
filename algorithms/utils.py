@@ -194,8 +194,8 @@ class ActorRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Distribution, Any]: # type: ignore[override]
         obs, dones = x
-        # obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
-        # obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, obs, statistics)
+        obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
+        obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, obs, statistics)
 
         # pdb.set_trace()
         # obs = concatenate([obs[:, :, 0:3], obs[:, :, -2:]], axis=-1) # BUG: testing with filter
@@ -203,8 +203,8 @@ class ActorRNN(Module):
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(obs)
         embedding = relu(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        # rnn_in = (embedding, dones)
+        # hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
 
         embedding = Dense(self.dense_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
         embedding = relu(embedding)
@@ -241,8 +241,8 @@ class CriticRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Array, RunningStats]: # type: ignore[override]
         critic_obs, dones = x
-        # critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
-        # critic_obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, critic_obs, statistics)
+        critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        critic_obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, critic_obs, statistics)
 
         # pdb.set_trace()
         # critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, -2:]], axis=-1) # BUG: testing with filter
@@ -250,8 +250,8 @@ class CriticRNN(Module):
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(critic_obs)
         embedding = relu(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        # rnn_in = (embedding, dones)
+        # hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
         
         embedding = Dense(self.dense_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
         embedding = relu(embedding)

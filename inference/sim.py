@@ -1,19 +1,13 @@
-# from os import environ
-# environ["MUJOCO_GL"] = "osmesa"
-from pprint import pprint
 from typing import Callable
 from mujoco import MjModel, MjData, MjvCamera, Renderer, mj_resetData, mj_step, mj_forward, mj_name2id, mjtObj
-
 from functools import partial
 from numpy import ndarray, zeros 
 from jax import Array, jit, tree_map
 from jax.random import PRNGKey as _PRNGKey, split as _split
 from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis, pi
 from jax.numpy.linalg import norm as _norm
-from jax.lax import slice as _slice
-
 from reproducibility_globals import PRNG_SEED
-from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN
+from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN, actor_forward
 from environments.A_to_B_jax import A_to_B
 
 
@@ -37,9 +31,10 @@ norm_cpu = jit(_norm, backend="cpu")
 concatenate_cpu = jit(_concatenate, static_argnames=("axis",), backend="cpu")
 array_cpu = jit(_array, backend="cpu")
 copy_cpu = jit(_copy, backend="cpu")
-slice_cpu = jit(_slice, static_argnames=("start_indices", "limit_indices", "strides"), backend="cpu") # doesn't accept negative indices
 PRNGKey_cpu = jit(_PRNGKey, backend="cpu")
 split_cpu = jit(_split, static_argnames=("num", ), backend="cpu")
+@partial(jit, static_argnames=("start_indices", "limit_indices"), backend="cpu")
+def slice_cpu(x, start_indices, limit_indices): return x[start_indices:limit_indices]
 
 
 global_rng = PRNGKey_cpu(PRNG_SEED)
@@ -50,9 +45,6 @@ global_cam.azimuth = 110
 global_cam.lookat = array_cpu([1.1, 0.0, 4.0])
 global_cam.distance = 5.00
 
-
-def actor_forward(network, params, hstate, input, running_stats):
-    return network.apply(params, hstate, input, running_stats)
 
 # WARNING: needs to be kept up-to-date with environment observe() method
 def observe(data: MjData, p_goal) -> ndarray:
@@ -71,29 +63,44 @@ def _reset_cpu(
         jit_reset_car_arm_and_gripper: Callable,
         jit_reset_ball_and_goal: Callable,
         model: MjModel, 
-        data: MjData
-        ) -> tuple[MjModel, MjData, Array]:
+        data: MjData,
+        rng: Array
+        ) -> tuple[MjModel, MjData, Array, Array]:
 
-    global global_rng
+    rng, qpos, qvel = jit_reset_car_arm_and_gripper(rng)
 
-    global_rng, qpos, qvel = jit_reset_car_arm_and_gripper(global_rng)
+    print("0_qvel:",data.qvel)
+
     data.qpos = qpos
     data.qvel = qvel
     data.ctrl = zeros(data.ctrl.shape)
     data.time = 0.0
+
+    print("01_qvel:",data.qvel)
+
     mj_forward(model, data)
 
+    print("1_qvel:",data.qvel)
+    
     grip_site = data.site_xpos[grip_site_id]
-    global_rng, q_ball, qd_ball, p_goal = jit_reset_ball_and_goal(global_rng, grip_site)                                     
-    qpos = concatenate_cpu((slice_cpu(qpos, (0,), (qpos.shape[0]-nq_ball,)), q_ball), axis=0)                                   
-    qvel = concatenate_cpu((slice_cpu(qpos, (0,), (qvel.shape[0]-nv_ball,)), qd_ball), axis=0)                                  
+    rng, q_ball, qd_ball, p_goal = jit_reset_ball_and_goal(rng, grip_site)                                     
+    qpos = concatenate_cpu((slice_cpu(qpos, 0, -nq_ball), q_ball), axis=0)                                   
+    qvel = concatenate_cpu((slice_cpu(qvel, 0, -nv_ball), qd_ball), axis=0)                                  
+
+    print("2_qvel:",qvel)
+
     data.qpos = qpos
     data.qvel = qvel
+    
+    print("21_qvel:", data.qvel)
+
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = -1.0
     mj_forward(model, data)
 
-    return model, data, p_goal
+    print("3_qvel:", data.qvel)
+
+    return model, data, p_goal, rng
 
 def _get_car_orientation(idx: int, data: MjData) -> ndarray:
     return data.qpos[idx]
@@ -115,7 +122,6 @@ def rollout(
 
     # Setup functions for CPU inference
     jit_actor_forward = jit(actor_forward, backend="cpu")
-    # jit_multi_actor_forward = jit(multi_actor_forward, backend="cpu")
     jit_decode_observation = jit(env.decode_observation, backend="cpu")
     jit_reset_car_arm_and_gripper = jit(env.reset_car_arm_and_gripper, backend="cpu")
     jit_reset_ball_and_goal = jit(env.reset_ball_and_goal, backend="cpu")
@@ -124,9 +130,13 @@ def rollout(
     reset_cpu = partial(_reset_cpu, env.nq_ball, env.nv_ball, env.grip_site_id, jit_reset_car_arm_and_gripper, jit_reset_ball_and_goal)
     get_car_orientation = partial(_get_car_orientation, env.car_orientation_index)
 
+    # PRNG keys 
+    global global_rng
+    global_rng, rng_r, rng_a = split_cpu(global_rng, 3)
+
     # Setup model, data and renderer
     mj_resetData(model, data)
-    model, data, p_goal = reset_cpu(model, data)
+    model, data, p_goal, rng_r = reset_cpu(model, data, rng_r)
     observation = observe(data, p_goal)
     done = array_cpu([False])
     global_cam.lookat = array_cpu([env.playing_area.x_center, env.playing_area.y_center, 0.3])
@@ -139,14 +149,17 @@ def rollout(
 
     _step = 0
 
+
     # Rollout
     for env_step in range(max_steps):
+        rng_a, *action_rngs = split_cpu(rng_a, env.num_agents+1)
+        reset_rng, rng_r = split_cpu(rng_r)
 
         if done: # Reset logic
 
             actor_hidden_states = init_actor_hidden_states
 
-            model, data, p_goal = reset_cpu(model, data)
+            model, data, p_goal, reset_rng = reset_cpu(model, data, reset_rng)
             mj_step(model, data)
 
             if _step % (1.0/(fps*dt)) <= 9.0e-1:
@@ -180,9 +193,11 @@ def rollout(
                     is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
             ))
 
-            action_rngs = split_cpu(global_rng, env.num_agents)
-            actions = tuple(policy.sample(seed=rng).squeeze() for rng, policy in zip(action_rngs, policies))
+            actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
+
+            # BUG: testing actions
+            environment_action = environment_action.at[0:3].set(array_cpu([0.0, 0.0, -0.2]))
 
             car_orientation = get_car_orientation(data)
             observation = observe(data, p_goal)

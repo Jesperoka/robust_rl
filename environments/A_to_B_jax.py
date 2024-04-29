@@ -65,8 +65,8 @@ class A_to_B:
         self.null_reward:     tuple[Array, Array] = options.null_reward
         self.obs_space:       Space = Space(low=options.obs_min, high=options.obs_max)
         self.act_space:       Space = Space(low=options.act_min, high=options.act_max)
-        self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # hardcoded for now
-        self.act_space_arm:   Space = Space(low=options.act_min[3:], high=options.act_max[3:]) # hardcoded for now
+        self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # WARNING: hardcoded for now
+        self.act_space_arm:   Space = Space(low=options.act_min[3:], high=options.act_max[3:]) # WARNING: hardcoded for now
         self.act_spaces:      tuple[Space, Space] = (self.act_space_car, self.act_space_arm)
 
         self.car_limits: ZeusLimits = ZeusLimits()
@@ -119,6 +119,9 @@ class A_to_B:
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: Array, mjx_data: Data) -> tuple[tuple[Data, Array], Array]:
         rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       
+
+        jax.debug.print("0_mjx qvel: {qvel}", qvel=mjx_data.qvel)
+
         mjx_data = mjx_forward(
                 self.mjx_model, 
                 mjx_data.replace(
@@ -131,13 +134,20 @@ class A_to_B:
                     # act_dot=jnp.zeros(self.mjx_model.na)
         ))
 
+        jax.debug.print("1_mjx qvel: {qvel}", qvel=mjx_data.qvel)
+
         grip_site = mjx_data.site_xpos[self.grip_site_id]
         rng, q_ball, qd_ball, p_goal = self.reset_ball_and_goal(rng, grip_site)                                     
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
+    
+        jax.debug.print("2_mjx qvel: {qvel}", qvel=qvel)
+
         mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
         observation = self.observe(mjx_data, p_goal)
         # observation, _, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
+
+        jax.debug.print("3_mjx qvel: {qvel}", qvel=mjx_data.qvel)
     
         return (mjx_data, p_goal), observation 
 
@@ -187,8 +197,7 @@ class A_to_B:
         ctrl_gripper = self.gripper_ctrl(a_gripper) 
 
         car_local_ctrl = self.car_ctrl(observation, a_car)                                                                                   
-        # ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
-        ctrl_car = car_local_ctrl
+        ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
 
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
@@ -226,7 +235,7 @@ class A_to_B:
         arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False)
         zeus_reward, panda_reward = self.reward_fn(observation, action)
 
-        zeus_reward = zeus_reward + car_goal_reward - car_outside_limits_reward - 0.1*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
+        zeus_reward = zeus_reward + car_goal_reward - car_outside_limits_reward #- 0.1*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
         panda_reward = panda_reward + arm_goal_reward #- car_goal_reward - arm_outside_limits_reward 
         reward = (zeus_reward, panda_reward)
 
@@ -365,7 +374,7 @@ def main():
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx, MjvCamera, Renderer, mj_forward # type: ignore[import]
     from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance, zero_reward 
     from inference.controllers import arm_PD, gripper_ctrl, arm_fixed_pose, gripper_always_grip, car_fixed_pose 
-    from algorithms.utils import FakeTrainState, ActorInput, init_actors, actor_forward
+    from algorithms.utils import FakeTrainState, ActorInput, initialize_actors, actor_forward
     from algorithms.mappo_jax import step_and_reset_if_done
 
     import pdb 
@@ -386,12 +395,12 @@ def main():
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
-        car_ctrl       = car_fixed_pose,
+        # car_ctrl       = car_fixed_pose,
         arm_ctrl       = arm_fixed_pose,
         gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.1,
         steps_per_ctrl = 20,
-        time_limit     = 1.0,
+        time_limit     = 4.0,
         num_envs       = num_envs,
         prng_seed      = reproducibility_globals.PRNG_SEED,
         # obs_min        =
@@ -405,7 +414,7 @@ def main():
 
     # pdb.set_trace()
 
-    renderer = Renderer(model, height=720, width=1080)
+    renderer = Renderer(model, height=360, width=480)
     cam = MjvCamera()
     cam.elevation = -35
     cam.azimuth = 110
@@ -421,7 +430,7 @@ def main():
     jit_step_and_reset_if_done = jax.jit(partial(step_and_reset_if_done, env))
 
     act_sizes = jax.tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
-    actors, actor_hidden_states = init_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
+    actors, actor_hidden_states = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
     actors.train_states = jax.tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
 
     frames = []
@@ -429,7 +438,7 @@ def main():
     img = ax.imshow(renderer.render(), animated=True)
 
     num_rollouts = 1
-    num_env_steps = 100 
+    num_env_steps = 100
 
     for rollout in range(num_rollouts):
         print("rollout:", rollout, "of", num_rollouts)
@@ -452,7 +461,7 @@ def main():
             print("env_step:", env_step, "of", num_env_steps)
 
             rng_a, *action_rngs = jax.random.split(rng_a, env.num_agents+1)
-            reset_rngs = rng_r #jax.random.split(rng_r, num_envs)
+            reset_rngs, rng_r = jax.random.split(rng_r)
 
             reset = jnp.logical_or(done, truncate)
             actor_inputs = tuple(
@@ -471,9 +480,11 @@ def main():
             ))
 
             actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
-            environment_actions = jnp.concatenate(actions, axis=-1)
+            environment_action = jnp.concatenate(actions, axis=-1)
+
+            environment_action = environment_action.at[0:3].set(jnp.array([0.0, 0.0, -0.2]))
             
-            environment_state, observation, terminal_observation, rewards, done, truncate = jit_step_and_reset_if_done(reset_rngs, environment_state, environment_actions)
+            environment_state, observation, terminal_observation, rewards, done, truncate = jit_step_and_reset_if_done(reset_rngs, environment_state, environment_action)
             done = done[jnp.newaxis]
             truncate = truncate[jnp.newaxis]
 
@@ -482,14 +493,15 @@ def main():
 
             # print(mjx.get_data(model, mjx_data))
             # jax.debug.print("mjx_data.contact {con}", con=mjx_data.contact)
-            jax.debug.print("mjx_data.ctrl {ctrl}", ctrl=mjx_data.ctrl)
+            # jax.debug.print("mjx_data.ctrl {ctrl}", ctrl=mjx_data.ctrl)
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = jnp.concatenate((p_goal, jnp.array([0.115])), axis=0)  # goal visualization
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = jnp.clip(1.4142136*car_reward + 1.0, -1.05, 1.05)
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = jnp.clip(arm_reward, -1.05, 1.05)
-            # mj_forward(model, data)
-
             data = mjx.get_data(model, mjx_data)
+            mj_forward(model, data)
+            # env.mjx_model = mjx.put_model(model)
+
             renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())
 

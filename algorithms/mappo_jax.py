@@ -54,6 +54,7 @@ class Transition(NamedTuple):
     observation:            Array               # observation before action is taken
     actions:                tuple[Array, ...]   # actions taken as a result of policy forward passes with observation
     rewards:                tuple[Array, ...]   # rewards 
+    # NOTE: TODO - add: bootstrapped_rewards:   tuple[Array, ...]
     values:                 tuple[Array, ...]   # values estimated as a result of critic forward passes with observation
     log_probs:              tuple[Array, ...]   # log_probs estimates as a result of action
     next_terminal:          Array               # terminal-or-not status of the resulting state after action is taken
@@ -178,40 +179,40 @@ def env_step(
             in_axes=(0, 0, 0)
     )(reset_rngs, carry.environment_state, environment_actions)
 
-    # Function to compute a value at the truncated observation
-    def _truncated_values() -> tuple[Array, Array]: 
+    # # Function to compute a value at the truncated observation
+    # def _truncated_values() -> tuple[Array, Array]: 
 
-        truncated_critic_inputs = tuple(
-                CriticInput(terminal_observation[jnp.newaxis, :], jnp.zeros_like(reset, dtype=jnp.bool)[jnp.newaxis, :])
-                for _ in range(env.num_agents)
-        )
+    #     truncated_critic_inputs = tuple(
+    #             CriticInput(terminal_observation[jnp.newaxis, :], jnp.zeros_like(reset, dtype=jnp.bool)[jnp.newaxis, :])
+    #             for _ in range(env.num_agents)
+    #     )
 
-        _, truncated_values, _ = zip(*jax.tree_map(critic_forward,
-                carry.critics.networks,
-                network_params,
-                carry.critic_hidden_states,
-                truncated_critic_inputs,
-                carry.critics.running_stats,
-                is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
-        ))
+    #     _, truncated_values, _ = zip(*jax.tree_map(critic_forward,
+    #             carry.critics.networks,
+    #             network_params,
+    #             critic_hidden_states,
+    #             truncated_critic_inputs,
+    #             carry.critics.running_stats,
+    #             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
+    #     ))
 
-        return truncated_values
+    #     return truncated_values
 
-    # If we truncate, then we compute the value of the observation that would have occured, and bootstrap the reward with that value.
-    terminal_values = jax.tree_map(
-            lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
-            (truncated, truncated),
-            _truncated_values(),
-            is_leaf=lambda x: not isinstance(x, tuple)
-    ) # ^wish there was a better way to do this
+    # # If we truncate, then we compute the value of the observation that would have occured, and bootstrap the reward with that value.
+    # terminal_values = jax.tree_map(
+    #         lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
+    #         (truncated, truncated),
+    #         _truncated_values(),
+    #         is_leaf=lambda x: not isinstance(x, tuple)
+    # ) # ^wish there was a better way to do this
 
-    # Bootstrap value at truncations (this will add zero if there was no truncation)
-    rewards = jax.tree_map(
-            lambda reward, value: reward + gamma*value,
-            rewards, 
-            terminal_values,
-            is_leaf=lambda x: not isinstance(x, tuple)
-    ) 
+    # # Bootstrap value at truncations (this will add zero if there was no truncation)
+    # rewards = jax.tree_map(
+    #         lambda reward, value: reward + gamma*value,
+    #         rewards, 
+    #         terminal_values,
+    #         is_leaf=lambda x: not isinstance(x, tuple)
+    # ) 
 
     transition = Transition(
             observation=carry.observation, 
@@ -244,7 +245,7 @@ def env_step(
 def generalized_advantage_estimate(
         gamma: float, 
         gae_lambda: float,           
-        traj_done: Array,
+        traj_next_terminal: Array,
         traj_value: Array,
         traj_reward: Array,
         final_value: Array   
@@ -257,14 +258,14 @@ def generalized_advantage_estimate(
         gae, next_value = gae_and_next_value
         done, value, reward = done_value_reward
 
-        delta = reward + gamma * next_value * (1 - done) - value
-        gae = delta + gamma * gae_lambda * (1 - done) * gae
+        delta = -value + reward + (1 - done) * gamma * next_value 
+        gae = delta + (1 - done) * gamma * gae_lambda * gae
 
         return (gae, value), gae
 
     final_gae = jnp.zeros_like(final_value)
 
-    _, advantage = jax.lax.scan(gae, (final_gae, final_value), (traj_done, traj_value, traj_reward), reverse=True, unroll=16)
+    _, advantage = jax.lax.scan(gae, (final_gae, final_value), (traj_next_terminal, traj_value, traj_reward), reverse=True, unroll=16)
 
     return advantage, advantage + traj_value
 
@@ -333,13 +334,13 @@ def critic_loss(
 
     def loss(value, minibatch_value, minibatch_target, minibatch_done):
         ### Value clipping 
-        # value_pred_clipped = minibatch_value + jnp.clip(value - minibatch_value, -clip_eps, clip_eps)
-        # value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
-        # value_losses_unclipped = jnp.square(value - minibatch_target)
-        # value_losses = jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()
+        value_pred_clipped = minibatch_value + jnp.clip(value - minibatch_value, -clip_eps, clip_eps)
+        value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
+        value_losses_unclipped = jnp.square(value - minibatch_target)
+        value_losses = jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()
 
         ### Without Value clipping
-        value_losses = jnp.square(value - minibatch_target).mean()
+        # value_losses = jnp.square(value - minibatch_target).mean()
         # jax.debug.print("value_losses {value_losses}", value_losses=value_losses)
 
         return vf_coef*value_losses
@@ -519,7 +520,7 @@ def train_step(
 
     advantages, targets = jax.tree_map(
             partial(generalized_advantage_estimate, gamma, gae_lambda),
-            (trajectory.terminal, trajectory.terminal), 
+            (trajectory.next_terminal, trajectory.next_terminal), 
             trajectory.values, 
             trajectory.rewards, 
             env_final_values,
@@ -784,8 +785,8 @@ def main():
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
-    num_envs = 16 
-    minibatch_size = 4 
+    num_envs = 256 
+    minibatch_size = 32 
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
@@ -807,20 +808,20 @@ def main():
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
     config: AlgorithmConfig = AlgorithmConfig(
-        lr              = 3.0e-4,
+        lr              = 0.0, #3.0e-4,
         num_envs        = num_envs,
-        num_env_steps   = 25,
+        num_env_steps   = 10,
         # total_timesteps = 209_715_200,
         total_timesteps = 20_971_520,
         # total_timesteps = 2_097_152,
-        update_epochs   = 4,
+        update_epochs   = 8,
         num_minibatches = num_envs // minibatch_size,
         gamma           = 0.99,
         gae_lambda      = 0.95,
         clip_eps        = 0.2, 
         scale_clip_eps  = False,
         ent_coef        = 0.01,
-        vf_coef         = 1000.0,
+        vf_coef         = 0.5,
         max_grad_norm   = 0.5,
         env_name        = "A_to_B_jax",
         rnn_hidden_size = 32,

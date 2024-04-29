@@ -158,7 +158,9 @@ class ZeusDimensions:
 
 @dataclass(frozen=True)
 class ZeusLimits:
-    # Orientation # WARNING: MuJoCo does NOT wrap angles, so we need to compute module ourselves
+    # Orientation # WARNING: MuJoCo does NOT wrap angles, so we need to compute modulo ourselves
+    magnitude_min:  float = 0.0 # fraction of max power
+    magnitude_max:  float = 1.0 # fraction of max power
     theta_min:  float = 0.0     # rad
     theta_max:  float = 2*pi    # rad
     omega_min:  float = -1.0    # rad/s
@@ -175,8 +177,8 @@ class ZeusLimits:
     q_max:      Array = field(default_factory=lambda:array([ZeusLimits.x_max, ZeusLimits.y_max, ZeusLimits.theta_max], dtype=float)) # m, m, rad
 
     # Actuation
-    a_min:  Array = field(default_factory=lambda:array([0.0, ZeusLimits.theta_min, ZeusLimits.omega_min], dtype=float))
-    a_max:  Array = field(default_factory=lambda:array([1.0, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))
+    a_min:  Array = field(default_factory=lambda:array([ZeusLimits.magnitude_min, ZeusLimits.theta_min, ZeusLimits.omega_min], dtype=float))
+    a_max:  Array = field(default_factory=lambda:array([ZeusLimits.magnitude_max, ZeusLimits.theta_max, ZeusLimits.omega_max], dtype=float))
 
 
 
