@@ -207,7 +207,7 @@ class A_to_B:
     def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
         (q_car, q_arm, q_gripper, 
          p_ball, qd_car, qd_arm, 
-         qd_gripper, pd_ball, p_goal) = self.decode_observation(observation)                     
+         qd_gripper, pd_ball, p_goal, d_goal) = self.decode_observation(observation)                     
 
         car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max)                          
         arm_outside_limits = self.outside_limits(qd_arm, minval=self.arm_limits.q_dot_min, maxval=self.arm_limits.q_dot_max)
@@ -220,14 +220,14 @@ class A_to_B:
         car_goal_reached = self.car_goal_reached(q_car, p_goal) # car reaches goal
         arm_goal_reached = self.arm_goal_reached(q_car, p_ball) # ball hits car
 
-        car_goal_reward = 5.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)
-        arm_goal_reward = 5.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)
+        car_goal_reward = 10.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)
+        arm_goal_reward = 10.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)
         car_outside_limits_reward = 3.5*jnp.astype(car_outside_limits, jnp.float32, copy=False)
         arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False)
         zeus_reward, panda_reward = self.reward_fn(observation, action)
 
-        zeus_reward = zeus_reward + car_goal_reward - car_outside_limits_reward #- 0.1*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
-        panda_reward = panda_reward + arm_goal_reward #- car_goal_reward - arm_outside_limits_reward 
+        zeus_reward = zeus_reward # + car_goal_reward - car_outside_limits_reward # - 0.05*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
+        panda_reward = panda_reward # + arm_goal_reward #- car_goal_reward - arm_outside_limits_reward 
         reward = (zeus_reward, panda_reward)
 
         done = jnp.logical_or(car_goal_reached, arm_goal_reached)
@@ -242,29 +242,67 @@ class A_to_B:
     # -------------------------------------------------------------------------------------------
     def get_car_orientation(self, mjx_data: Data) -> Array:
         return mjx_data.qpos[self.car_orientation_index]                                                    
+
+    # does the same as: arr.at[index].set(jnp.mod(arr[index], modulus)), but works with numpy arrays as well (which is needed for MuJoCo cpu rollouts)
+    def modulo_at_index(self, arr: Array, index: int, modulus: float) -> Array:
+        val = jnp.array([jnp.mod(arr[index], modulus)], dtype=jnp.float32)
+        out_arr = jnp.concatenate([arr[0 : index], val, arr[index+1 :]], axis=0)
+        # assert jnp.allclose(out_arr, arr.at[index].set(jnp.mod(arr[index], modulus))), "arr should be the same as arr.at[index].set(val)"
+        return out_arr
     
     def observe(self, mjx_data: Data, p_goal: Array) -> Array:
-        # Manually wrap angle
-        qpos = mjx_data.qpos.at[self.car_orientation_index].set(jnp.mod(mjx_data.qpos[self.car_orientation_index], 2*pi))
-        return jnp.concatenate([                                                                                        
-            qpos,
+        raw_obs = jnp.concatenate([
+            mjx_data.qpos,
             mjx_data.qvel,
             p_goal
-            ], axis=0)
+        ], axis=0)
 
-    def decode_observation(self, observation: Array) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+        (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, _p_goal) = self.decode_raw_observation(raw_obs)
+
+        # Manually wrap car orienatation angle
+        q_car = self.modulo_at_index(q_car, self.car_orientation_index, 2*pi) 
+
+        d_goal = jnp.array([jnp.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
+
+        obs = jnp.concatenate([
+            q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal
+        ], axis=0)
+
+        return obs
+
+
+    def decode_raw_observation(self, observation: Array) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+        n_pos_ball = self.nq_ball - 4       # can't observe orientation of ball
+        n_lin_vel_ball = self.nv_ball - 3   # can't observe angular velocity of ball
         return (
                 observation[0 : self.nq_car],                                                                                                                                                                                                                       
                 observation[self.nq_car : self.nq_car + self.nq_arm],                                                                                                                                                                                               
                 observation[self.nq_car + self.nq_arm : self.nq_car + self.nq_arm + self.nq_gripper],                                                                                                                                                               
-                observation[self.nq_car + self.nq_arm + self.nq_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball-4], # can't observe orientation of ball                                                                                        
+                observation[self.nq_car + self.nq_arm + self.nq_gripper : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball], # can't observe orientation of ball
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car],                                                                                                 
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm],                                                                     
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper],                                     
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball-3],  # can't observe angular velocity of ball   
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball],  # can't observe angular velocity of ball
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + self.nq_ball + self.nv_car + self.nv_arm + self.nv_gripper + self.nv_ball : ]                                                                                                             
                 )
         # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal)
+
+    def decode_observation(self, observation: Array) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+        n_pos_ball = self.nq_ball - 4       # can't observe orientation of ball
+        n_lin_vel_ball = self.nv_ball - 3   # can't observe angular velocity of ball
+        return (
+                observation[0 : self.nq_car],                                                                                                                                                                                                                       
+                observation[self.nq_car : self.nq_car + self.nq_arm],                                                                                                                                                                                               
+                observation[self.nq_car + self.nq_arm : self.nq_car + self.nq_arm + self.nq_gripper],                                                                                                                                                               
+                observation[self.nq_car + self.nq_arm + self.nq_gripper : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball], # can't observe orientation of ball                                                                                        
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car],                                                                                                 
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm],                                                                     
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper],                                     
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball],  # can't observe angular velocity of ball   
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal : ]
+                )
+        # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal)
 
     def decode_action(self, action: Array) -> tuple[Array, Array, Array]:
         return (
@@ -332,14 +370,6 @@ class A_to_B:
     def arm_goal_reached(self, q_car: Array, q_ball: Array) -> Array: # WARNING: hardcoded height
         return jnp.linalg.norm(jnp.stack([q_car[0], q_car[1], 0.1], axis=0) - q_ball[:3]) <= self.goal_radius 
 
-    # def gripper_ctrl(self, action: Array) -> Array:
-    #     def grip() -> Array:
-    #         return jnp.array([0.02, -0.005, 0.02, -0.005], dtype=jnp.float32)                                      
-    #     def release() -> Array: 
-    #         return jnp.array([0.04, 0.05, 0.04, 0.05], dtype=jnp.float32)                                          
-
-    #     return jax.lax.cond(action[0] > 0.0, grip, release)
-
     def car_local_polar_to_global_cartesian(self, orientation: Array, magnitude: Array, angle: Array, omega: Array) -> Array:
         # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
         def car_velocity_modifier(theta: Array) -> Array:
@@ -402,8 +432,6 @@ def main():
 
     env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
-
-    # pdb.set_trace()
 
     renderer = Renderer(model, height=360, width=480)
     cam = MjvCamera()

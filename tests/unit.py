@@ -217,7 +217,8 @@ def test_observation_decoding_functions():
         7.0, 7.0, 7.0, 7.0, 7.0, 7.0,  # ball qvel
         8.0, 8.0, # goal pos
     ])
-    assert raw_obs.shape[0] == 39
+    raw_obs_size = 39
+    assert raw_obs.shape[0] == raw_obs_size, f"Expected shape: {raw_obs_size}, got: {raw_obs.shape[0]}"
 
     q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal = ENV.decode_raw_observation(raw_obs)
     assert jnp.all(q_car == jnp.array([0.0, 0.0, 0.0])), f"Expected: {jnp.array([0.0, 0.0, 0.0])}, got: {q_car}"
@@ -240,11 +241,16 @@ def test_observation_decoding_functions():
         5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  # arm vel
         6.0, 6.0,  # gripper vel
         7.0, 7.0, 7.0,  # ball vel
-        8.0, 8.0  # goal pos
+        8.0, 8.0,  # goal pos
+        9.0, # goal distance
     ])
-    assert obs.shape[0] == 32
+    obs_size = 33
+    assert obs.shape[0] == obs_size, f"Expected shape: {obs_size}, got: {obs.shape[0]}"
+    assert obs.shape == OPTIONS.obs_min.shape, f"Expected shape: {OPTIONS.obs_min.shape}, got: {obs.shape}"
+    assert obs.shape == OPTIONS.obs_max.shape, f"Expected shape: {OPTIONS.obs_max.shape}, got: {obs.shape}"
 
-    q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal = ENV.decode_observation(obs)
+
+    q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal = ENV.decode_observation(obs)
     assert jnp.all(q_car == jnp.array([0.0, 0.0, 0.0])), f"Expected: {jnp.array([0.0, 0.0, 0.0])}, got: {q_car}"
     assert jnp.all(q_arm == jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])), f"Expected: {jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])}, got: {q_arm}"
     assert jnp.all(q_gripper == jnp.array([2.0, 2.0])), f"Expected: {jnp.array([2.0, 2.0])}, got: {q_gripper}"
@@ -254,6 +260,49 @@ def test_observation_decoding_functions():
     assert jnp.all(qd_gripper == jnp.array([6.0, 6.0])), f"Expected: {jnp.array([6.0, 6.0])}, got: {qd_gripper}"
     assert jnp.all(pd_ball == jnp.array([7.0, 7.0, 7.0])), f"Expected: {jnp.array([7.0, 7.0, 7.0])}, got: {pd_ball}"
     assert jnp.all(p_goal == jnp.array([8.0, 8.0])), f"Expected: {jnp.array([8.0, 8.0])}, got: {p_goal}"
+    assert jnp.all(d_goal == jnp.array([9.0, 9.0])), f"Expected: {jnp.array([9.0, 9.0])}, got: {d_goal}"
+
+
+def test_env_observe():
+    raw_obs_no_goal = jnp.array([
+        -1.0, -1.0, -1.0,  # car pos
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # arm pos
+        2.0, 2.0,  # gripper pos
+        3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, # ball pose
+        4.0, 4.0, 4.0,  # car vel
+        5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  # arm vel
+        6.0, 6.0,  # gripper vel
+        7.0, 7.0, 7.0, 7.0, 7.0, 7.0,  # ball qvel
+    ])
+    raw_obs_no_goal_size = 37
+    qpos_size = 19
+    qvel_size = 18
+    assert qpos_size + qvel_size == raw_obs_no_goal_size, f"Expected shape: {raw_obs_no_goal_size}, got: {qpos_size + qvel_size}"
+    assert raw_obs_no_goal.shape[0] == raw_obs_no_goal_size, f"Expected shape: {raw_obs_no_goal_size}, got: {raw_obs_no_goal.shape[0]}"
+    assert raw_obs_no_goal[0:qpos_size].shape == MJX_DATA.qpos.shape, f"Expected shape: {MJX_DATA.qpos.shape}, got: {raw_obs_no_goal.shape}"
+    assert raw_obs_no_goal[qpos_size:qpos_size+qvel_size].shape == MJX_DATA.qvel.shape, f"Expected shape: {MJX_DATA.qvel.shape}, got: {raw_obs_no_goal.shape}"
+
+    mjx_data = MJX_DATA.replace(qpos=raw_obs_no_goal[0:qpos_size], qvel=raw_obs_no_goal[qpos_size:qpos_size+qvel_size])
+    p_goal = jnp.array([8.0, 8.0])
+
+    obs = ENV.observe(mjx_data, p_goal)
+    obs_size = 33
+    assert obs.shape[0] == obs_size, f"Expected shape: {obs_size}, got: {obs.shape[0]}"
+    assert obs.shape == OPTIONS.obs_min.shape, f"Expected shape: {OPTIONS.obs_min.shape}, got: {obs.shape}"
+    assert obs.shape == OPTIONS.obs_max.shape, f"Expected shape: {OPTIONS.obs_max.shape}, got: {obs.shape}"
+
+    q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal = ENV.decode_observation(obs)
+    assert jnp.all(q_car == jnp.array([-1.0, -1.0, jnp.mod(-1.0, 2*jnp.pi)])), f"Expected: {jnp.array([-1.0, -1.0, jnp.mod(-1.0, 2*jnp.pi)])}, got: {q_car}"
+    assert jnp.all(q_arm == jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])), f"Expected: {jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])}, got: {q_arm}"
+    assert jnp.all(q_gripper == jnp.array([2.0, 2.0])), f"Expected: {jnp.array([2.0, 2.0])}, got: {q_gripper}"
+    assert jnp.all(p_ball == jnp.array([3.0, 3.0, 3.0])), f"Expected: {jnp.array([3.0, 3.0, 3.0])}, got: {p_ball}"
+    assert jnp.all(qd_car == jnp.array([4.0, 4.0, 4.0])), f"Expected: {jnp.array([4.0, 4.0, 4.0])}, got: {qd_car}"
+    assert jnp.all(qd_arm == jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0])), f"Expected: {jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0])}, got: {qd_arm}"
+    assert jnp.all(qd_gripper == jnp.array([6.0, 6.0])), f"Expected: {jnp.array([6.0, 6.0])}, got: {qd_gripper}"
+    assert jnp.all(pd_ball == jnp.array([7.0, 7.0, 7.0])), f"Expected: {jnp.array([7.0, 7.0, 7.0])}, got: {pd_ball}"
+    assert jnp.all(p_goal == jnp.array([8.0, 8.0])), f"Expected: {jnp.array([8.0, 8.0])}, got: {p_goal}"
+    assert jnp.all(d_goal == jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])), f"Expected: {jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])}, got: {d_goal}"
+
 
 # END OF TESTS FOR: Environment subroutines
 ##############################################################################################################################################################################
@@ -271,6 +320,8 @@ def test_observation_decoding_functions():
 # USED FOR: Training a policy
 ##############################################################################################################################################################################
 GAE_ATOL = 1e-5
+
+
 
 @pytest.mark.parametrize(
     """
@@ -508,7 +559,7 @@ def test_compare_gae_implementation_stable_baselines_and_jaxmarl(gamma, gae_lamb
     my_advantages, my_targets = generalized_advantage_estimate(
         gamma=gamma,
         gae_lambda=gae_lambda,
-        traj_terminal=traj_next_terminal,
+        traj_next_terminal=traj_next_terminal,
         traj_value=traj_value,
         traj_reward=traj_reward,
         final_value=_final_value,
@@ -540,4 +591,3 @@ def test_compare_gae_implementation_stable_baselines_and_jaxmarl(gamma, gae_lamb
 
     # Can be uncommented to check the values
     # assert False, f"\n\nMe: \n\n{my_advantages}, \n\n{my_targets} \n\nJaxMarl: \n\n{jaxmarl_advantages}, \n\n{jaxmarl_targets} \n\nStableBaselines: \n\n{sb_advantages}, \n\n{sb_targets}"
-

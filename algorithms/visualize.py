@@ -340,6 +340,8 @@ def main():
 
         return partial(training_loop, rollout_generator_queue, displayer_queue)
     
+    # WARNING: I CHANGED HOW actor_forward is passed to rollout
+
     # _rollout_fn = _rollout
     _rollout_fn = partial(rollout, env, model, data)
     _rollout_fn = partial(_rollout_fn, max_steps=250)

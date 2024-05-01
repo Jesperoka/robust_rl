@@ -19,7 +19,7 @@ KP = 80.0
 KD = 5.0
 
 def car_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, kp: float=KP, kd: float=KD) -> Array:
-    (q_car, _, _, _, qd_car, _, _, _, _) = decode_obs(obs)
+    (q_car, _, _, _, qd_car, _, _, _, _, _) = decode_obs(obs)
     
     v_x_y_omega = kp*(a_car - q_car) + kd*(0.0 - qd_car)
 
@@ -31,7 +31,7 @@ def car_fixed_pose(decode_obs: ObsDecodeFuncSig, obs: Array, a_car: Array, pose:
     return tau
 
 def arm_PD(decode_obs: ObsDecodeFuncSig, obs: Array, a_arm: Array, kp: float=KP, kd: float=KD) -> Array:
-    (_, q_arm, _, _, _, qd_arm, _, _, _) = decode_obs(obs)
+    (_, q_arm, _, _, _, qd_arm, _, _, _, _) = decode_obs(obs)
     
     tau = kp*(a_arm - q_arm) + kd*(0.0 - qd_arm) 
 

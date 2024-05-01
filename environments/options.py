@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal, TypeAlias
 from reproducibility_globals import PRNG_SEED 
 
-ObsDecodeFuncSig: TypeAlias = Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]]
+ObsDecodeFuncSig: TypeAlias = Callable[[Array], tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]]
 
 def passthrough(x: Array) -> Array:
     return x
@@ -25,7 +25,7 @@ class EnvironmentOptions:
     prng_seed:      int = PRNG_SEED
     null_reward:    tuple[Array, Array] = field(default_factory=lambda: (array(0.0, dtype=float32), array(0.0, dtype=float32))) # TODO: remove
     agent_ids:      tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
-    obs_min:        Array = field(default_factory=lambda: -3.5*ones(39, dtype=float32))
-    obs_max:        Array = field(default_factory=lambda: 3.5*ones(39, dtype=float32))
+    obs_min:        Array = field(default_factory=lambda: -3.5*ones(33, dtype=float32))
+    obs_max:        Array = field(default_factory=lambda: 3.5*ones(33, dtype=float32))
     act_min:        Array = field(default_factory=lambda: -ones(11, dtype=float32))
     act_max:        Array = field(default_factory=lambda: ones(11, dtype=float32))

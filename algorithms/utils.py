@@ -1,12 +1,14 @@
 from flax.training.train_state import TrainState
-from jax import Array, debug
+from jax import Array, debug, jit 
+from jax._src.pjit import JitWrapped
 from jax._src.random import KeyArray
+from jax._src.stages import Compiled
 from jax.lax import scan, cond
-from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, array, ones_like, logical_and, exp, concatenate
-from jax.random import PRNGKey
+from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, array, ones_like, logical_and, exp, concatenate, tanh, sqrt
+from jax.random import PRNGKey, split
 from distrax import Transformed, ScalarAffine, Beta
 from tensorflow_probability.substrates.jax.bijectors import Tanh 
-from tensorflow_probability.substrates.jax.distributions import Independent, Normal, TransformedDistribution, Distribution
+from tensorflow_probability.substrates.jax.distributions import Independent, Normal, TransformedDistribution, Distribution, SphericalUniform 
 from flax.linen import FrozenDict, compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
@@ -49,7 +51,7 @@ class TanhTransformedDistribution(TransformedDistribution):
     """
     A distribution transformed using the `tanh` function.
 
-    This transformation was adapted to acme's implementation.
+    This transformation was adapted from acme's implementation.
     For details, please see: http://tinyurl.com/2x5xea57
     """
 
@@ -103,11 +105,25 @@ class TanhTransformedDistribution(TransformedDistribution):
         """Returns the mode of the distribution."""
         return self.bijector.forward(self.distribution.mode())
 
-    def entropy(self, seed: KeyArray = None) -> Array:
-        """Computes an estimation of the entropy using a sample of the log_det_jacobian."""
-        return self.distribution.entropy() + self.bijector.forward_log_det_jacobian(
-            self.distribution.sample(seed=seed), event_ndims=0
-        )
+    def single_step_entropy_estimate(self, seed: KeyArray) -> Array:
+        """Computes an estimate of the entropy using a sample of the log_det_jacobian."""
+        sample = self.distribution.sample(seed=seed)
+        return self.distribution.entropy() + self.bijector.forward_log_det_jacobian(sample, event_ndims=0)
+
+    def n_step_entropy_estimate(self, seed: KeyArray, n: int = 5) -> Array:
+        """Computes the single sample entropy estimate n times and takes the mean."""
+        
+        def f(seed, xs):
+            seed, _seed = split(seed)
+            return seed, self.single_step_entropy_estimate(_seed)
+
+        _, entropy = scan(f, seed, None, length=n)
+
+        return mean(entropy, axis=0)
+
+    def entropy(self, seed: KeyArray):
+        # return log(self.action_dims) - self.kl_divergence(self.uniform_distribution)
+        return self.n_step_entropy_estimate(seed)
 
     @classmethod
     def _parameter_properties(cls, dtype: Optional[Any], num_classes: Any = None) -> Any:
@@ -129,8 +145,6 @@ def batch_welford_update(init_carry: tuple[Array, Array, int], x_batch: Array) -
     return (M_new, S_new, count)
 
 
-# TODO: fix: why am I passing obs to cond functions?
-
 # Input normalization using Welford algorithm for running statistics
 def update_and_normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
     mean_obs, welford_S, running_count, skip_update = statistics 
@@ -138,15 +152,18 @@ def update_and_normalize_input(obs: Array, statistics: RunningStats) -> tuple[Ar
     stacked_obs = obs.reshape(-1, obs.shape[-1]) # merge batch and env dimensions (we assume observation dimension is flat and last)
 
     def first_update(args):
-        stacked_obs, obs, *_ = args 
+        first = 1
+        count = 1
+        stacked_obs, *_ = args 
         mean_obs = mean(stacked_obs, axis=0)
-        return mean_obs, zeros_like(mean_obs), 1, 1
+        return mean_obs, zeros_like(mean_obs), count, first 
 
     def update(args):
-        stacked_obs, _, mean_obs, welford_S, running_count = args
-        return *batch_welford_update((mean_obs, welford_S, running_count), stacked_obs), 0
+        first = 0
+        stacked_obs, mean_obs, welford_S, running_count = args
+        return *batch_welford_update((mean_obs, welford_S, running_count), stacked_obs), first 
 
-    mean_obs, welford_S, running_count, first = cond(running_count == 0, first_update, update, (stacked_obs, obs, mean_obs, welford_S, running_count))
+    mean_obs, welford_S, running_count, first = cond(running_count == 0, first_update, update, (stacked_obs, mean_obs, welford_S, running_count))
 
     var = welford_S / (running_count - 1 + first)
 
@@ -154,6 +171,7 @@ def update_and_normalize_input(obs: Array, statistics: RunningStats) -> tuple[Ar
 
 def normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
     mean_obs, welford_S, running_count, skip_update = statistics 
+
     first = (running_count == 0)
     var = welford_S / (running_count - 1 + where(first, 1, 0))
 
@@ -170,11 +188,8 @@ class ScannedRNN(Module):
         rnn_state = carry
         ins, resets = x
 
-        # pdb.set_trace()
-        # # ins = concatenate([ins[:, :, 0:3], ins[:, :, -3:]], axis=-1) # BUG: testing with filter
-
-        rnn_state = where(resets[:, newaxis], self.initialize_carry(ins.shape[0], self.hidden_size), rnn_state)
-        new_rnn_state, y = GRUCell(features=ins.shape[-1])(rnn_state, ins)
+        rnn_state = where(resets[:, newaxis], self.initialize_carry(*rnn_state.shape), rnn_state)
+        new_rnn_state, y = GRUCell(features=self.hidden_size)(rnn_state, ins)
 
         return new_rnn_state, y
 
@@ -194,19 +209,19 @@ class ActorRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Distribution, Any]: # type: ignore[override]
         obs, dones = x
-        obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
-        obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, obs, statistics)
+        # obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
+        # obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, obs, statistics)
 
-        # pdb.set_trace()
-        # obs = concatenate([obs[:, :, 0:3], obs[:, :, -2:]], axis=-1) # BUG: testing with filter
+        # cq, cq, cq, aq, aq ,aq, aq, aq, aq, aq, gq, gq, bp, bp, bp, cv, cv, cv, av, av, av, av, av, av, gv, gv, bv, bv, bv, pg, pg
+        obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # BUG: testing with filter
 
-        embedding = Dense(self.hidden_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(obs)
+        embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(obs)
         embedding = relu(embedding)
 
-        # rnn_in = (embedding, dones)
-        # hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        rnn_in = (embedding, dones)
+        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
 
-        embedding = Dense(self.dense_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
+        embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
         embedding = relu(embedding)
 
         # https://arxiv.org/pdf/2111.02202.pdf
@@ -220,7 +235,7 @@ class ActorRNN(Module):
 
         mu = Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
         log_std = Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
-        std = exp(clip(log_std, -7.0, 1.0))
+        std = exp(clip(log_std, -20.0, 0.1))
 
         policy = Independent(TanhTransformedDistribution(Normal(mu, std)), reinterpreted_batch_ndims=1)
 
@@ -241,24 +256,25 @@ class CriticRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], statistics: RunningStats) -> tuple[Array, Array, RunningStats]: # type: ignore[override]
         critic_obs, dones = x
-        critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
-        critic_obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, critic_obs, statistics)
+        # critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        # critic_obs, statistics = cond(statistics.skip_update, normalize_input, update_and_normalize_input, critic_obs, statistics)
 
-        # pdb.set_trace()
-        # critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, -2:]], axis=-1) # BUG: testing with filter
+        # cq, cq, cq, aq, aq ,aq, aq, aq, aq, aq, gq, gq, bp, bp, bp, cv, cv, cv, av, av, av, av, av, av, gv, gv, bv, bv, bv, pg, pg
+        critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # BUG: testing with filter
 
-        embedding = Dense(self.hidden_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(critic_obs)
+        embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
         embedding = relu(embedding)
 
-        # rnn_in = (embedding, dones)
-        # hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        rnn_in = (embedding, dones)
+        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
         
-        embedding = Dense(self.dense_size, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
+        embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
         embedding = relu(embedding)
 
-        value = Dense(1, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
+        value = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(embedding)
         
         return hidden, squeeze(value, axis=-1), statistics
+
 
 def critic_forward(network, params, hstate, input, running_stats): 
     critic_hidden_state, value, running_stats = network.apply(params, hstate, input, running_stats)
@@ -267,9 +283,9 @@ def critic_forward(network, params, hstate, input, running_stats):
     return critic_hidden_state, value, running_stats
 
 # Allows passing module as carry to jax.lax.scan in training loop
-register_static(ScannedRNN)
-register_static(ActorRNN)
-register_static(CriticRNN)
+# register_static(ScannedRNN)
+# register_static(ActorRNN)
+# register_static(CriticRNN)
 
 
 def linear_schedule(
@@ -286,11 +302,12 @@ class FakeTrainState:
     def apply_gradients(self, *args, **kwargs): return self 
 
 
+# BUG: change to NamedTuple just to ensure no unintentional side-effects (or make frozen, but why bother)
 @dataclass
 class MultiActorRNN:
     num_actors:         int
     rnn_hidden_size:    int
-    networks:           tuple[ActorRNN, ...]
+    # apply_fns:          tuple[JitWrapped, ...]
     train_states:       tuple[TrainState | FakeTrainState, ...]
     running_stats:      tuple[RunningStats, ...]
 
@@ -299,7 +316,7 @@ class MultiActorRNN:
 class MultiCriticRNN:
     num_critics:        int
     rnn_hidden_size:    int
-    networks:           tuple[CriticRNN, ...]
+    # networks:           tuple[CriticRNN, ...] # TODO: here as well
     train_states:       tuple[TrainState, ...]
     running_stats:      tuple[RunningStats, ...]
 
@@ -324,18 +341,25 @@ def initialize_actors(
                              for _ in range(num_agents))
 
     actor_networks = tuple(ActorRNN(action_dim=act_size, hidden_size=rnn_hidden_size, dense_size=rnn_fc_size) for act_size in act_sizes)
-    actor_network_params = tuple(network.init(rng, dummy_hstate, dummy_actor_input, dummy_stats) 
-                                 for rng, network, dummy_hstate, dummy_stats in zip(actor_rngs, actor_networks, dummy_actor_hstates, dummy_statistics))
+
+    actor_network_params = tuple(
+            network.init(rng, dummy_hstate, dummy_actor_input, dummy_stats) 
+            for rng, network, dummy_hstate, dummy_stats 
+            in zip(actor_rngs, actor_networks, dummy_actor_hstates, dummy_statistics)
+    )
+
+
+    # apply_fns = tuple(jit(partial(actor_forward, network)) for network in actor_networks)
 
     actors = MultiActorRNN(
         num_actors=num_agents,
         rnn_hidden_size=rnn_hidden_size,
-        networks=actor_networks,
+        # apply_fns=apply_fns,
         train_states=tuple(
             TrainState.create(
                 apply_fn=network.apply, 
                 params=params, 
-                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-7))
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
             ) for network, params in zip(actor_networks, actor_network_params)),
         running_stats=dummy_statistics
     )
@@ -380,14 +404,31 @@ def initialize_critics(
     critics = MultiCriticRNN(
         num_critics=num_agents,
         rnn_hidden_size=rnn_hidden_size,
-        networks=critic_networks,
+        # networks=critic_networks,
         train_states=tuple(
             TrainState.create(
                 apply_fn=network.apply, 
                 params=params, 
-                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-7))
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
             ) for network, params in zip(critic_networks, critic_network_params)),
         running_stats=dummy_statistics
     )
 
     return critics, dummy_critic_hstates 
+
+
+def squeeze_value(apply_fn):
+    """Wraps an apply function to squeeze the middle return value.
+
+    Params: 
+        apply_fn: A function that returns a tuple of (hidden_state, value, running_stats)
+
+    Returns:
+        A function that returns a tuple of (hidden_state, squeezed_value, running_stats)
+    """
+
+    def f(*args, **kwargs):
+        hstate, value, stats = apply_fn(*args, **kwargs)
+        return hstate, squeeze(value), stats
+
+    return f

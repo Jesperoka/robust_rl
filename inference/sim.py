@@ -1,4 +1,5 @@
-from typing import Callable
+from typing import Any, Callable
+from flax.linen import FrozenDict
 from mujoco import MjModel, MjData, MjvCamera, Renderer, mj_resetData, mj_step, mj_forward, mj_name2id, mjtObj
 from functools import partial
 from numpy import ndarray, zeros 
@@ -6,8 +7,9 @@ from jax import Array, jit, tree_map
 from jax.random import PRNGKey as _PRNGKey, split as _split
 from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis, pi
 from jax.numpy.linalg import norm as _norm
+from tensorflow_probability.substrates.jax.distributions import Distribution
 from reproducibility_globals import PRNG_SEED
-from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN, actor_forward
+from algorithms.utils import ActorInput, RunningStats, ScannedRNN, MultiActorRNN, actor_forward
 from environments.A_to_B_jax import A_to_B
 
 
@@ -44,16 +46,6 @@ global_cam.elevation = -30
 global_cam.azimuth = 110
 global_cam.lookat = array_cpu([1.1, 0.0, 4.0])
 global_cam.distance = 5.00
-
-
-# WARNING: needs to be kept up-to-date with environment observe() method
-def observe(data: MjData, p_goal) -> ndarray:
-    qpos = array_cpu(data.qpos).at[2].set(mod_cpu(data.qpos[2], 2.0*pi))
-    return concatenate_cpu([                                                                                        
-        qpos,
-        data.qvel,
-        p_goal
-        ], axis=0)
 
 
 def _reset_cpu(
@@ -96,6 +88,7 @@ def rollout(
         env: A_to_B, 
         model: MjModel, 
         data: MjData, 
+        actor_forward_fns: tuple[Callable[[FrozenDict[str, Any], Array, ActorInput, RunningStats], tuple[Array, Distribution, RunningStats]], ...],
         renderer: Renderer | FakeRenderer, 
         actors: MultiActorRNN, 
         max_steps: int = 500,
@@ -106,7 +99,7 @@ def rollout(
     dt = model.opt.timestep
 
     # Setup functions for CPU inference
-    jit_actor_forward = jit(actor_forward, backend="cpu")
+    jit_actor_forward_fns = tuple(jit(f, backend="cpu") for f in actor_forward_fns)
     jit_decode_observation = jit(env.decode_observation, backend="cpu")
     jit_reset_car_arm_and_gripper = jit(env.reset_car_arm_and_gripper, backend="cpu")
     jit_reset_ball_and_goal = jit(env.reset_ball_and_goal, backend="cpu")
@@ -122,7 +115,7 @@ def rollout(
     # Setup model, data and renderer
     mj_resetData(model, data)
     model, data, p_goal, rng_r = reset_cpu(model, data, rng_r)
-    observation = observe(data, p_goal)
+    observation = env.observe(data, p_goal) # type abuse
     done = array_cpu([False])
     global_cam.lookat = array_cpu([env.playing_area.x_center, env.playing_area.y_center, 0.3])
     renderer.update_scene(data, global_cam)
@@ -134,7 +127,6 @@ def rollout(
 
     _step = 0
 
-
     # Rollout
     for env_step in range(max_steps):
         rng_a, *action_rngs = split_cpu(rng_a, env.num_agents+1)
@@ -142,7 +134,7 @@ def rollout(
 
         if done: # Reset logic
 
-            actor_hidden_states = init_actor_hidden_states
+            actor_hidden_states = tuple(copy_cpu(hs) for hs in init_actor_hidden_states)
 
             model, data, p_goal, reset_rng = reset_cpu(model, data, reset_rng)
             mj_step(model, data)
@@ -151,8 +143,8 @@ def rollout(
                 renderer.update_scene(data, global_cam)
                 frames.append(renderer.render())
 
-            observation = observe(data, p_goal)
-            (q_car, _, _, p_ball, _, _, _, _, p_goal) = jit_decode_observation(observation)
+            observation = env.observe(data, p_goal) # type abuse
+            (q_car, _, _, p_ball, _, _, _, _, p_goal, d_goal) = jit_decode_observation(observation)
                 
             # TODO: init action and use evaluate_environment to get done
             done = array_cpu([
@@ -166,27 +158,26 @@ def rollout(
         else: # Step logic
 
             actor_inputs = tuple((observation[newaxis, :][newaxis, :], done[newaxis, :]) for _ in range(env.num_agents))
-
-            network_params = tree_map(lambda ts: ts.params, actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
     
-            actor_hidden_states, policies, actors.running_stats = zip(*tree_map(jit_actor_forward, 
-                    actors.networks,
-                    network_params,
-                    actor_hidden_states,
-                    actor_inputs,
-                    actors.running_stats,
-                    is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+            actor_hidden_states, policies, actors.running_stats = zip(*tree_map(
+                lambda apply_fn, ts, hs, ins, rs: apply_fn(ts.params, hs, ins, rs),
+                jit_actor_forward_fns, 
+                actors.train_states,
+                actor_hidden_states,
+                actor_inputs,
+                actors.running_stats,
+                is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
             ))
 
             actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
 
             car_orientation = get_car_orientation(data)
-            observation = observe(data, p_goal)
+            observation = env.observe(data, p_goal) # type abuse
             data.ctrl = jit_compute_controls(car_orientation, observation, environment_action) # type abuse
 
-            observation = observe(data, p_goal)
-            (q_car, q_arm, q_gripper, p_ball, q_ball, q_goal, q_car_goal, q_arm_goal, p_goal) = jit_decode_observation(observation)
+            observation = env.observe(data, p_goal) # type abuse
+            (q_car, q_arm, q_gripper, p_ball, q_ball, q_goal, q_car_goal, q_arm_goal, p_goal, d_goal) = jit_decode_observation(observation)
 
             observation, (car_reward, arm_reward), done, p_goal, aux = jit_evaluate_environment(observation, environment_action)
 
