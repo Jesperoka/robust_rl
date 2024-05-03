@@ -1,6 +1,5 @@
 """Adapted from PureJaxRL and Mava implementations."""
 
-from flax.linen import FrozenDict
 import jax
 from tensorflow_probability.substrates.jax.distributions import Distribution
 if __name__=="__main__":
@@ -41,7 +40,7 @@ from functools import partial
 from typing import Any, Callable, NamedTuple, TypeAlias 
 from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
-from algorithms.utils import ActorRNN, CriticRNN, RunningStats, MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, FakeTrainState, initialize_actors, initialize_critics, actor_forward, critic_forward, linear_schedule, squeeze_value
+from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value
 from algorithms.visualize import PlotMetrics
 from multiprocessing import Queue
 from multiprocessing.queues import Full
@@ -50,6 +49,13 @@ import pdb
 
 # Misc
 # TODO: clean up old commented code once everything is working
+# TODO: rework TrainStepMetrics for plotting in the report 
+
+# (WIP)            # TODO: merge running_stats and batch_stats
+
+# REJECTED: code quality -
+#       - refactor from:    ((a1.v1, a2.v1), (a1.v2, a2.v2), (a1.v3, a2.v3)) 
+#       - to:               ((a1.v1, a1.v2, a1.v3), (a2.v1, a2.v2, a2.v3))
 
 # RL performance
 # TODO: normalize gae based on whole batch
@@ -60,7 +66,7 @@ import pdb
 # TODO: make log_std a state-independent parameter
 # TODO: experiment with KL divergence penalty instead of ratio clipping
 # TODO: experiment with cyclic learning rate
-# TODO: imporve observation filtering
+# TODO: improve observation filtering
 # TODO: investigate once again if there is something wrong with the terminal masking
 # TODO: investigate once again the truncation value bootstrapping (should be better with reward normalization)
 # TODO: predict normalized values
@@ -81,8 +87,8 @@ class Transition(NamedTuple):
     next_terminal:          Array               # terminal-or-not status of the state that was observed after the action was taken, used in GAE calculation
     terminal:               Array               # terminal-or-not status of the state that corresponds to observation, used to reset hidden states
     truncated:              Array               # truncated-or-not status of the state that corresponds to observation, uses to reset hidden states
-    actor_hidden_states:    tuple[Array, ...]   # actor hidden states from before action is taken   # NOTE: double check
-    critic_hidden_states:   tuple[Array, ...]   # critic hidden states from before action is taken  # NOTE: double check
+    actor_hidden_states:    tuple[Array, ...]   # actor hidden states from before action is taken   # TODO: enable training on split sequence minibatches  
+    critic_hidden_states:   tuple[Array, ...]   # critic hidden states from before action is taken  # TODO: enable training on split sequence minibatches
 
 Trajectory: TypeAlias = Transition # type alias for stacked transitions 
 
@@ -130,7 +136,6 @@ class MinibatchMetrics(NamedTuple):
 EpochMetrics: TypeAlias = MinibatchMetrics # type alias for stacked minibatch metrics
 TrainStepMetrics: TypeAlias = EpochMetrics # type alias for stacked epoch metrics (which are stacked minibatch metrics)
 
-
 def step_and_reset_if_done(
         env: A_to_B,            # partial() in make_train()
         reset_rng: KeyArray, 
@@ -142,9 +147,9 @@ def step_and_reset_if_done(
     # The observation from step is used when resetting, IF we are resetting because of a truncation
     (mjx_data, p_goal), observation, rewards, terminal, truncated = env.step(*env_state, env_action)
 
-    # keep track of the returns
+    # keep track of the total returns
     returns = jax.tree_map(
-            lambda _done, _reward, _return: jnp.where(_done, _reward, _return + _reward), 
+        lambda _done, _reward, _return: jnp.where(_done, _reward, _return + _reward), 
             (terminal, terminal), 
             rewards, 
             returns,
@@ -171,13 +176,14 @@ def env_step(
             for _ in range(env.num_agents)
     )
 
-    actor_hidden_states, policies, carry.actors.running_stats = zip(*jax.tree_map(
-        lambda ts, hs, ins, rs: ts.apply_fn(ts.params, hs, ins, rs),
-        carry.actors.train_states,
-        carry.actor_hidden_states,
-        actor_inputs,
-        carry.actors.running_stats,
-        is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+    # Actor forward pass
+    actor_hidden_states, policies = zip(*jax.tree_map(
+        lambda ts, vars, hs, ins: ts.apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
+            carry.actors.train_states,
+            carry.actors.vars,
+            carry.actor_hidden_states,
+            actor_inputs,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
     ))
 
     actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
@@ -195,13 +201,14 @@ def env_step(
     #         for i in range(env.num_agents)
     # )
 
-    critic_hidden_states, values, carry.critics.running_stats = zip(*jax.tree_map(
-        lambda ts, hs, ins, rs: squeeze_value(ts.apply_fn)(ts.params, hs, ins, rs),
-        carry.critics.train_states,
-        carry.critic_hidden_states,
-        critic_inputs,
-        carry.critics.running_stats,
-        is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
+    # Critic forward pass
+    critic_hidden_states, values = zip(*jax.tree_map(
+        lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
+            carry.critics.train_states,
+            carry.critics.vars,
+            carry.critic_hidden_states,
+            critic_inputs,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
     
     # Step environment
@@ -218,20 +225,20 @@ def env_step(
                 for _ in range(env.num_agents)
         )
 
-        _, truncated_values, _ = zip(*jax.tree_map(
-            lambda ts, hs, ins, rs: squeeze_value(ts.apply_fn)(ts.params, hs, ins, rs),
-            carry.critics.train_states,
-            critic_hidden_states,
-            truncated_critic_inputs,
-            carry.critics.running_stats,
-            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
+        _, truncated_values = zip(*jax.tree_map(
+            lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
+                carry.critics.train_states,
+                carry.critics.vars,
+                critic_hidden_states,
+                truncated_critic_inputs,
+                is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
         ))
 
         return truncated_values
 
     # If we truncate, then we need to compute the value of the observation that would have occured, and bootstrap the return estimate with that value via the reward.
     terminal_values = jax.tree_map(
-            lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
+        lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
             (truncated, truncated),
             _truncated_values(),
             is_leaf=lambda x: not isinstance(x, tuple)
@@ -239,7 +246,7 @@ def env_step(
 
     # Bootstrap value at truncations (this will add zero if there was no truncation)
     bootstrapped_rewards = jax.tree_map(
-            lambda reward, terminal_value: reward + gamma*terminal_value,
+        lambda reward, terminal_value: reward + gamma*terminal_value,
             rewards, 
             terminal_values,
             is_leaf=lambda x: not isinstance(x, tuple)
@@ -310,8 +317,8 @@ def generalized_advantage_estimate(
 def actor_loss(
         clip_eps: float, ent_coef: float,  # partial() these in make_train()
         params: VariableDict,
-        apply_fn: Callable[[VariableDict, Array, ActorInput, RunningStats], tuple[Array, Distribution, RunningStats]],
-        running_stats: RunningStats,
+        vars: VariableDict,
+        apply_fn: Callable[[VariableDict, Array, ActorInput], tuple[Array, Distribution]],
         minibatch_gae: Array,
         minibatch_observation: Array,
         minibatch_action: Array,
@@ -326,42 +333,32 @@ def actor_loss(
         ratio = jnp.exp(log_prob - minibatch_log_prob)
         clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
 
-        # Auxilliary metrics
-        approx_kl = ((ratio - 1) - (log_prob - minibatch_log_prob)).mean()
-        clip_frac = jnp.mean((jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32))
-        min_ratio = jnp.min(ratio)
-        mean_ratio = jnp.mean(ratio)
-        max_ratio = jnp.max(ratio)
-
-        # entropy = policy.entropy(seed=entropy_rng).mean() # type: ignore[attr-defined]
         entropy = policy.entropy(seed=entropy_rng).mean()
         actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
         entropy_regularized_actor_utility = actor_utility + ent_coef * entropy
     
         actor_loss = -entropy_regularized_actor_utility
 
-        return actor_loss, (entropy, clip_frac, min_ratio, mean_ratio, max_ratio)
+        return actor_loss, entropy
 
     minibatch_reset = jnp.logical_or(minibatch_terminal, minibatch_truncated)
     input = ActorInput(minibatch_observation, minibatch_reset) 
 
-    _, policy, _ = apply_fn(params, minibatch_hidden_state[0], input, running_stats)  # type: ignore[assignment]
-    log_prob = policy.log_prob(minibatch_action)                                # type: ignore[attr-defined]
+    (_, policy), updated_vars = apply_fn({"params": params, "vars": vars}, minibatch_hidden_state[0], input, train=True, mutable="vars") # type: ignore[arg-defined]
+    log_prob = policy.log_prob(minibatch_action)    # type: ignore[attr-defined]
 
     gae = (minibatch_gae - minibatch_gae.mean()) / (minibatch_gae.std() + 1e-8)
 
-    actor_loss, aux = loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng)
-    entropy, clip_frac, min_ratio, mean_ratio, max_ratio = aux
-    # jax.debug.print("clip_frac: {clip_frac}, min_ratio: {min_ratio}, mean_ratio: {mean_ratio}, max_ratio: {max_ratio}", clip_frac=clip_frac, min_ratio=min_ratio, mean_ratio=mean_ratio, max_ratio=max_ratio)
+    actor_loss, entropy = loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng)
 
-    return actor_loss, entropy
+    return actor_loss, (entropy, updated_vars["vars"])
 
 
 def critic_loss(
         clip_eps: float, vf_coef: float,    # partial() these in make_train() 
         params: VariableDict,
-        apply_fn: Callable[[VariableDict, Array, CriticInput, RunningStats], tuple[Array, Array, RunningStats]],
-        running_stats: RunningStats,
+        vars: VariableDict,
+        apply_fn: Callable[[VariableDict, Array, CriticInput], tuple[Array, Array]],
         minibatch_target: Array,
         minibatch_observation: Array,
         minibatch_other_action: Array,
@@ -369,7 +366,7 @@ def critic_loss(
         minibatch_terminal: Array,
         minibatch_truncated: Array,
         minibatch_hidden_state: Array,
-        ) -> Array:
+        ) -> tuple[Array, Any]:
 
     def loss(value, minibatch_value, minibatch_target):
         ### Value clipping 
@@ -388,11 +385,12 @@ def critic_loss(
     input = CriticInput(minibatch_observation, minibatch_reset)
     # input = CriticInput(jnp.concatenate([minibatch_observation, minibatch_other_action], axis=-1), minibatch_done)
 
-    _, value, _ = apply_fn(params, minibatch_hidden_state[0], input, running_stats) # type: ignore[assignment]
+    (_, value), updated_vars = apply_fn({"params": params, "vars": vars}, minibatch_hidden_state[0], input, train=True, mutable="vars") # type: ignore[arg-defined]
+    value = value.squeeze()
 
     critic_loss = loss(value, minibatch_value, minibatch_target)
 
-    return critic_loss
+    return critic_loss, updated_vars["vars"]
 
 
 def gradient_minibatch_step(
@@ -405,16 +403,12 @@ def gradient_minibatch_step(
     minibatch_rng, *entropy_rngs = jax.random.split(carry.minibatch_rng, 3)
     entropy_rngs = tuple(entropy_rngs)
 
-    carry.actors.running_stats = jax.tree_map(lambda stats: RunningStats(*stats[:-1], True), carry.actors.running_stats, is_leaf=lambda x: isinstance(x, RunningStats))
-    carry.critics.running_stats = jax.tree_map(lambda stats: RunningStats(*stats[:-1], True), carry.critics.running_stats, is_leaf=lambda x: isinstance(x, RunningStats))
-
     actor_grad_fn = jax.value_and_grad(actor_loss_fn, argnums=0, has_aux=True)
 
-    
-    (actor_losses, entropies), actor_grads = zip(*jax.tree_map(
-        lambda ts, rs, adv, obs, act, log_p, term, trunc, hs, rng: actor_grad_fn(ts.params, ts.apply_fn, rs, adv, obs, act, log_p, term, trunc, hs, rng),
+    actor_loss_out, actor_grads = zip(*jax.tree_map(
+        lambda ts, vars, adv, obs, act, log_p, term, trunc, hs, rng: actor_grad_fn(ts.params, vars, ts.apply_fn, adv, obs, act, log_p, term, trunc, hs, rng),
             carry.actors.train_states,
-            carry.actors.running_stats, 
+            carry.actors.vars,
             minibatch.advantages,
             (minibatch.trajectory.observation, minibatch.trajectory.observation), 
             minibatch.trajectory.actions, 
@@ -425,43 +419,47 @@ def gradient_minibatch_step(
             entropy_rngs,
             is_leaf=lambda x: not isinstance(x, tuple)
     ))
+    actor_losses, aux = zip(*actor_loss_out)
+    entropies, actor_vars = zip(*aux)
 
-    carry.actors.train_states = jax.tree_map(lambda ts, grad: ts.apply_gradients(grads=grad), 
+    carry.actors.train_states, carry.actors.vars = zip(*jax.tree_map(
+        lambda ts, vars, grad: (ts.apply_gradients(grads=grad), vars), 
             carry.actors.train_states, 
-            actor_grads,
+            actor_vars,
+            actor_grads, 
             is_leaf=lambda x: not isinstance(x, tuple)
-    )
+    ))
 
     minibatch_other_actions = tuple(
             jnp.concatenate([action for j, action in enumerate(minibatch.trajectory.actions) if j != i], axis=-1)
             for i in range(num_actors)
     )
 
-    critic_grad_fn = jax.value_and_grad(critic_loss_fn, argnums=0, has_aux=False)
+    critic_grad_fn = jax.value_and_grad(critic_loss_fn, argnums=0, has_aux=True)
 
-    critic_losses, critic_grads = zip(*jax.tree_map(
-        lambda ts, rs, trgt, obs, act, val, term, trunc, hs: critic_grad_fn(ts.params, squeeze_value(ts.apply_fn), rs, trgt, obs, act, val, term, trunc, hs),
-        carry.critics.train_states,
-        carry.critics.running_stats,
-        minibatch.targets,
-        (minibatch.trajectory.observation, minibatch.trajectory.observation),
-        minibatch_other_actions,
-        minibatch.trajectory.values,
-        (minibatch.trajectory.terminal, minibatch.trajectory.terminal),
-        (minibatch.trajectory.truncated, minibatch.trajectory.truncated),
-        minibatch.trajectory.critic_hidden_states, 
-        is_leaf=lambda x: not isinstance(x, tuple)
-    ))
-
-    carry.critics.train_states = jax.tree_map(lambda ts, grad: ts.apply_gradients(grads=grad),
+    critic_loss_out, critic_grads = zip(*jax.tree_map(
+        lambda ts, vars, trgt, obs, act, val, term, trunc, hs: critic_grad_fn(ts.params, vars, ts.apply_fn, trgt, obs, act, val, term, trunc, hs),
             carry.critics.train_states,
+            carry.critics.vars,
+            minibatch.targets,
+            (minibatch.trajectory.observation, minibatch.trajectory.observation),
+            minibatch_other_actions,
+            minibatch.trajectory.values,
+            (minibatch.trajectory.terminal, minibatch.trajectory.terminal),
+            (minibatch.trajectory.truncated, minibatch.trajectory.truncated),
+            minibatch.trajectory.critic_hidden_states, 
+            is_leaf=lambda x: not isinstance(x, tuple)
+    ))
+    critic_losses, critic_vars = zip(*critic_loss_out)
+
+    carry.critics.train_states, carry.critics.vars = zip(*jax.tree_map(
+        lambda ts, vars, grad: (ts.apply_gradients(grads=grad), vars),
+            carry.critics.train_states,
+            critic_vars,
             critic_grads,
             is_leaf=lambda x: not isinstance(x, tuple)
-    )
+    ))
     
-    carry.actors.running_stats = jax.tree_map(lambda stats: RunningStats(*stats[:-1], False), carry.actors.running_stats, is_leaf=lambda x: isinstance(x, RunningStats))
-    carry.critics.running_stats = jax.tree_map(lambda stats: RunningStats(*stats[:-1], False), carry.critics.running_stats, is_leaf=lambda x: isinstance(x, RunningStats))
-
     minibatch_metrics = MinibatchMetrics(
         actor_losses=actor_losses,
         critic_losses=critic_losses,
@@ -541,29 +539,14 @@ def train_step(
     #         for i in range(num_agents)
     # )
 
-    _, env_final_values, _ = zip(*jax.tree_map(
-            lambda ts, hs, ins, rs: squeeze_value(ts.apply_fn)(ts.params, hs, ins, rs),
+    _, env_final_values = zip(*jax.tree_map(
+        lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
             env_final.critics.train_states,
+            env_final.critics.vars,
             env_final.critic_hidden_states,
             critic_inputs,
-            env_final.critics.running_stats,
             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
-    
-    # jax.debug.print("isinstance(env_final.critics.train_states, tuple): {x}", x=isinstance(env_final.critics.train_states, tuple))
-    # jax.debug.print("isinstance(env_final.critic_hidden_states, tuple): {x}", x=isinstance(env_final.critic_hidden_states, tuple))
-    # jax.debug.print("isinstance(critic_inputs, tuple): {x}", x=isinstance(critic_inputs, tuple))
-    # jax.debug.print("isinstance(env_final.critics.running_stats, tuple): {x}", x=isinstance(env_final.critics.running_stats, tuple))
-
-    # jax.debug.print("isinstance(env_final.critics.train_states[0], tuple): {x}", x=isinstance(env_final.critics.train_states[0], tuple))
-    # jax.debug.print("isinstance(env_final.critic_hidden_states[0], tuple): {x}", x=isinstance(env_final.critic_hidden_states[0], tuple))
-    # jax.debug.print("isinstance(critic_inputs[0], tuple): {x}", x=isinstance(critic_inputs[0], tuple))
-    # jax.debug.print("isinstance(env_final.critics.running_stats[0], tuple): {x}", x=isinstance(env_final.critics.running_stats[0], tuple))
-
-    # jax.debug.print("isinstance(env_final.critics.train_states[1].params, tuple): {x}", x=isinstance(env_final.critics.train_states[1].params, tuple))
-    # jax.debug.print("isinstance(env_final.critic_hidden_states[1], tuple): {x}", x=isinstance(env_final.critic_hidden_states[1], tuple))
-    # jax.debug.print("isinstance(critic_inputs[1], tuple): {x}", x=isinstance(critic_inputs[1], tuple))
-    # jax.debug.print("isinstance(env_final.critics.running_stats[1], tuple): {x}", x=isinstance(env_final.critics.running_stats[1], tuple))
 
     # NOTE: If next_terminal is correctly recorded in the trajectory, then we should not need to mask the final values here (will be handled in GAE)
     env_final_values = jax.tree_map(lambda value: jnp.where(env_final.terminal, jnp.zeros_like(value), value), env_final_values)
@@ -577,6 +560,7 @@ def train_step(
             is_leaf = lambda x: not isinstance(x, tuple)
     ))
 
+
     epoch_carry = EpochCarry(
             actors=env_final.actors, 
             critics=env_final.critics, 
@@ -584,22 +568,6 @@ def train_step(
             advantages=advantages, 
             targets=targets
     )
-
-    jax.debug.print("advantages.mean(): {advantages}", advantages=advantages[0].mean())
-    jax.debug.print("first advantages: {fa}", fa=advantages[0][0].mean())
-    jax.debug.print("last advantages: {la}", la=advantages[0][-1].mean())
-
-    jax.debug.print("targets.mean(): {targets}", targets=targets[0].mean())
-    jax.debug.print("first targets: {ft}", ft=targets[0][0].mean())
-    jax.debug.print("last targets: {lt}", lt=targets[0][-1].mean())
-
-    jax.debug.print("sum(rewards): {rewards}", rewards=jnp.sum(trajectory.rewards[0], axis=0).mean())
-    jax.debug.print("first rewards: {fr}", fr=trajectory.rewards[0][0].mean())
-    jax.debug.print("last rewards: {lr}", lr=trajectory.rewards[0][-1].mean())
-
-    jax.debug.print("terminal.mean(): {term}", term=trajectory.terminal[0].astype(jnp.float32).mean())
-    jax.debug.print("truncated.mean(): {trunc}", trunc=trajectory.truncated[0].astype(jnp.float32).mean())
-    jax.debug.print("sum(value).mean(): {values}", values=jnp.sum(trajectory.values[0], axis=0).mean())
 
     epoch_final, epoch_metrics = jax.lax.scan(gradient_epoch_step_fn, epoch_carry, epoch_rngs, num_gradient_epochs)
 
@@ -665,7 +633,6 @@ def train_step(
     min_return = jax.tree_map(lambda reward: jnp.min(reward, axis=0).squeeze(), returns) 
     mean_return = jax.tree_map(lambda reward: jnp.mean(reward, axis=0).squeeze(), returns)
     max_return = jax.tree_map(lambda reward: jnp.max(reward, axis=0).squeeze(), returns)
-
 
     plot_metrics: dict[str, PlotMetrics] = {
             "actor_0": {
@@ -776,12 +743,12 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
                 for _ in range(env.num_agents)
         )
 
-        _, init_policies, _ = zip(*jax.tree_map(
-            lambda ts, hs, ins, rs: ts.apply_fn(ts.params, hs, ins, rs),
+        _, init_policies = zip(*jax.tree_map(
+            lambda ts, vars, hs, ins: ts.apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
             init_actors.train_states,
+            init_actors.vars,
             init_actor_hidden_states,
             init_actor_inputs,
-            init_actors.running_stats,
             is_leaf=lambda x: not isinstance(x, tuple)
         ))
 
@@ -815,11 +782,10 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
     return train
 # -------------------------------------------------------------------------------------------------------
-    
+ 
 
 def main():
     import reproducibility_globals
-    from os import environ
     from os.path import abspath, dirname, join
     from mujoco import MjModel, MjData, Renderer, mj_resetData, mj_name2id, mjtObj, mjx # type: ignore[import]
     from environments.A_to_B_jax import A_to_B
@@ -912,10 +878,10 @@ def main():
     act_sizes = jax.tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
     actors, _ = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, config.lr, config.max_grad_norm, config.rnn_hidden_size, config.rnn_fc_size)
 
-    actor_forward_fns = tuple(ts.apply_fn for ts in actors.train_states) # type: ignore[attr-defined]
+    actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
     actors.train_states = jax.tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
 
-    rollout_fn = partial(rollout, env, model, data, actor_forward_fns, max_steps=150)
+    rollout_fn = partial(rollout, env, model, data, actor_forward_fns, config.rnn_hidden_size, max_steps=150)
     rollout_generator_fn = partial(rollout_generator, (model, 900, 640), Renderer, rollout_fn)
     data_displayer_fn = partial(data_displayer, 900, 640, 126)
 
@@ -970,6 +936,8 @@ def main():
     restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_TEST"), state=actors, args=args.PyTreeRestore(actors))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_actors.train_states[0].params))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[1].params, restored_actors.train_states[1].params))
+    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[0], restored_actors.vars[0]))
+    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[1], restored_actors.vars[1]))
     print("\n..actors restored.\n\n")
 
     inputs = tuple(
@@ -977,12 +945,12 @@ def main():
             for _ in range(env.num_agents)
     )
     
-    # TODO: apply_fn stuff, might also be possible to do in inference.sim if jit beforehand
-    _, policies, _ = zip(*jax.tree_map(
-        actor_forward, 
-        actor_hidden_states,
-        inputs,
-        restored_actors.running_stats,
+    _, policies = zip(*jax.tree_map(
+        lambda ts, vars, hs, inputs: ts.apply_fn({"params": ts.params, "vars": vars}, hs, inputs, train=False),
+            restored_actors.train_states,
+            restored_actors.vars,
+            actor_hidden_states,
+            inputs,
         is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
     ))
 
@@ -990,6 +958,7 @@ def main():
 
     print(actions)
     print([action.shape for action in actions])
+
 
 if __name__ == "__main__":
     main()

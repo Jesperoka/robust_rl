@@ -3,20 +3,18 @@ from flax.linen import FrozenDict
 from mujoco import MjModel, MjData, MjvCamera, Renderer, mj_resetData, mj_step, mj_forward, mj_name2id, mjtObj
 from functools import partial
 from numpy import ndarray, zeros 
-from jax import Array, jit, tree_map
+from jax import Array, jit, tree_map 
 from jax.random import PRNGKey as _PRNGKey, split as _split
-from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis, pi
+from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis
 from jax.numpy.linalg import norm as _norm
 from tensorflow_probability.substrates.jax.distributions import Distribution
 from reproducibility_globals import PRNG_SEED
-from algorithms.utils import ActorInput, RunningStats, ScannedRNN, MultiActorRNN, actor_forward
+from algorithms.utils import ActorInput, RunningStats, ScannedRNN, MultiActorRNN 
 from environments.A_to_B_jax import A_to_B
 
 
 import pdb
 
-# NOTE: I need to create all the necessary functions for inference in simulation on the CPU anyway
-# TODO: I need to create the necessary functions for inference on the real system
 
 # Used to run rollout without initializing MuJoCo renderer, which is useful for jitting before multiprocessed rollouts
 class FakeRenderer:
@@ -88,7 +86,8 @@ def rollout(
         env: A_to_B, 
         model: MjModel, 
         data: MjData, 
-        actor_forward_fns: tuple[Callable[[FrozenDict[str, Any], Array, ActorInput, RunningStats], tuple[Array, Distribution, RunningStats]], ...],
+        actor_forward_fns: tuple[Callable[[FrozenDict[str, Any], Array, ActorInput], tuple[Array, Distribution]], ...],
+        rnn_hidden_size: int,
         renderer: Renderer | FakeRenderer, 
         actors: MultiActorRNN, 
         max_steps: int = 500,
@@ -99,7 +98,7 @@ def rollout(
     dt = model.opt.timestep
 
     # Setup functions for CPU inference
-    jit_actor_forward_fns = tuple(jit(f, backend="cpu") for f in actor_forward_fns)
+    jit_actor_forward_fns = tuple(jit(f, static_argnames="train", backend="cpu") for f in actor_forward_fns)
     jit_decode_observation = jit(env.decode_observation, backend="cpu")
     jit_reset_car_arm_and_gripper = jit(env.reset_car_arm_and_gripper, backend="cpu")
     jit_reset_ball_and_goal = jit(env.reset_ball_and_goal, backend="cpu")
@@ -121,7 +120,7 @@ def rollout(
     renderer.update_scene(data, global_cam)
 
     # Setup actor rnn hidden states 
-    dummy_actor_hstate = ScannedRNN.initialize_carry(1, actors.rnn_hidden_size)
+    dummy_actor_hstate = ScannedRNN.initialize_carry(1, rnn_hidden_size)
     init_actor_hidden_states = tuple(dummy_actor_hstate for _ in range(env.num_agents))
     actor_hidden_states = tuple(copy_cpu(dummy_actor_hstate) for _ in range(env.num_agents))
 
@@ -159,13 +158,13 @@ def rollout(
 
             actor_inputs = tuple((observation[newaxis, :][newaxis, :], done[newaxis, :]) for _ in range(env.num_agents))
     
-            actor_hidden_states, policies, actors.running_stats = zip(*tree_map(
-                lambda apply_fn, ts, hs, ins, rs: apply_fn(ts.params, hs, ins, rs),
+            actor_hidden_states, policies = zip(*tree_map(
+                lambda apply_fn, ts, vars, hs, ins: apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
                 jit_actor_forward_fns, 
                 actors.train_states,
+                actors.vars,
                 actor_hidden_states,
                 actor_inputs,
-                actors.running_stats,
                 is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
             ))
 
