@@ -40,7 +40,7 @@ from functools import partial
 from typing import Any, Callable, NamedTuple, TypeAlias 
 from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
-from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value
+from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, update_stats
 from algorithms.visualize import PlotMetrics
 from multiprocessing import Queue
 from multiprocessing.queues import Full
@@ -104,6 +104,7 @@ class EnvStepCarry(NamedTuple):
     actor_hidden_states:    tuple[Array, ...]
     critic_hidden_states:   tuple[Array, ...]
     environment_state:      tuple[Data, Array] # TODO: make type
+    return_stats:           tuple[RunningStats, ...] # 
 
 class MinibatchCarry(NamedTuple):
     actors:         MultiActorRNN
@@ -137,87 +138,78 @@ EpochMetrics: TypeAlias = MinibatchMetrics # type alias for stacked minibatch me
 TrainStepMetrics: TypeAlias = EpochMetrics # type alias for stacked epoch metrics (which are stacked minibatch metrics)
 
 def step_and_reset_if_done(
-        env: A_to_B,            # partial() in make_train()
+        env: A_to_B,
         reset_rng: KeyArray, 
         env_state: tuple[Data, Array], 
         env_action: Array,
-        returns: tuple[Array, ...]
-        ) -> tuple[tuple[Data, Array], Array, Array, tuple[Array, ...], Array, Array, tuple[Array, ...]]:
+        ) -> tuple[tuple[Data, Array], Array, Array, tuple[Array, ...], Array, Array]:
     
     # The observation from step is used when resetting, IF we are resetting because of a truncation
     (mjx_data, p_goal), observation, rewards, terminal, truncated = env.step(*env_state, env_action)
 
-    # keep track of the total returns
-    returns = jax.tree_map(
-        lambda _done, _reward, _return: jnp.where(_done, _reward, _return + _reward), 
-            (terminal, terminal), 
-            rewards, 
-            returns,
-            is_leaf=lambda x: not isinstance(x, tuple)
-    )
-
-    def reset(): return *env.reset(reset_rng, mjx_data), observation, rewards, terminal, truncated, returns
-    def step(): return (mjx_data, p_goal), observation, observation, rewards, terminal, truncated, returns
+    def reset(): return *env.reset(reset_rng, mjx_data), observation, rewards, terminal, truncated
+    def step(): return (mjx_data, p_goal), observation, observation, rewards, terminal, truncated 
 
     return jax.lax.cond(jnp.logical_or(terminal, truncated), reset, step)
 
 
-def env_step(
-        env: Any, num_envs: int, gamma: float,       # partial() these in make_train()
-        carry: EnvStepCarry, step_rng: KeyArray     # remaining args after partial()
-        ) -> tuple[EnvStepCarry, Transition]:
+def normalize_rewards(
+        rewards: tuple[Array, ...], 
+        terminal: Array,
+        truncated: Array,
+        prev_returns: tuple[Array, ...], 
+        prev_return_stats: tuple[RunningStats, ...], 
+        gamma: float
+        ) -> tuple[tuple[Array,...], tuple[Array, ...], tuple[RunningStats, ...]]: 
 
-    reset_rngs, *action_rngs = jax.random.split(step_rng, env.num_agents+1)
-    reset_rngs = jax.random.split(reset_rngs, num_envs)
-
-    reset = jnp.logical_or(carry.terminal, carry.truncated)
-    actor_inputs = tuple(
-            ActorInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :]) 
-            for _ in range(env.num_agents)
+    return_stats = jax.tree_map(
+            lambda ret, stats: RunningStats(*update_stats(jnp.expand_dims(ret, -1), stats)), 
+            prev_returns,
+            prev_return_stats,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, RunningStats)
+    )
+    variances = jax.tree_map(
+            lambda rs: rs.welford_S / (rs.running_count - 1 + rs.first),
+            return_stats,
+            is_leaf=lambda x: isinstance(x, RunningStats)
+    )
+    rewards = jax.tree_map(
+        lambda rew, var, rs: rew / (jnp.sqrt(var + 1e-8) + rs.first),
+            rewards,
+            variances,
+            return_stats,
+            is_leaf=lambda x: not isinstance(x, tuple)
+    )
+    return_stats = jax.tree_map(
+        lambda rs: RunningStats(rs.mean_obs, rs.welford_S, rs.running_count, 0),
+        return_stats,
+        is_leaf=lambda x: isinstance(x, RunningStats)
     )
 
-    # Actor forward pass
-    actor_hidden_states, policies = zip(*jax.tree_map(
-        lambda ts, vars, hs, ins: ts.apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
-            carry.actors.train_states,
-            carry.actors.vars,
-            carry.actor_hidden_states,
-            actor_inputs,
-            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
-    ))
-
-    actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
-    log_probs = jax.tree_map(lambda policy, action: policy.log_prob(action).squeeze(), policies, actions, is_leaf=lambda x: not isinstance(x, tuple))
-    environment_actions = jnp.concatenate(actions, axis=-1)
-
-    # BUG: debugging without opponent actions
-    critic_inputs = tuple(
-            CriticInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :])
-            for _ in range(env.num_agents)
+    done = jnp.logical_or(terminal, truncated)
+    returns = jax.tree_map(
+        lambda d, rew, ret: jnp.where(d, rew, ret*gamma + rew), 
+            (done, done), 
+            rewards, 
+            prev_returns,
+            is_leaf=lambda x: not isinstance(x, tuple)
     )
-    # critic_inputs = tuple( # NOTE: trying out with current opponent action as opposed to previous (change: carry.actions to actions)
-    #         CriticInput(jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
-    #         carry.done[jnp.newaxis, :]) 
-    #         for i in range(env.num_agents)
-    # )
 
-    # Critic forward pass
-    critic_hidden_states, values = zip(*jax.tree_map(
-        lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
-            carry.critics.train_states,
-            carry.critics.vars,
-            carry.critic_hidden_states,
-            critic_inputs,
-            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
-    ))
-    
-    # Step environment
-    environment_state, observation, terminal_observation, rewards, terminal, truncated, returns = jax.vmap(
-            partial(step_and_reset_if_done, env), 
-            in_axes=(0, 0, 0, 0)
-    )(reset_rngs, carry.environment_state, environment_actions, carry.returns)
+    return rewards, returns, return_stats
 
-    # Function to compute a value at the truncated observation
+
+# BUG: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
+def bootstap_value_at_truncation(
+        env: A_to_B,
+        gamma: float,
+        critics: MultiCriticRNN,
+        critic_hidden_states: tuple[Array, ...],
+        terminal_observation: Array,
+        reset: Array,
+        rewards: tuple[Array, ...],
+        truncated: Array,
+        ) -> tuple[Array, ...]:
+
     def _truncated_values() -> tuple[Array, Array]: 
 
         truncated_critic_inputs = tuple(
@@ -227,8 +219,8 @@ def env_step(
 
         _, truncated_values = zip(*jax.tree_map(
             lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
-                carry.critics.train_states,
-                carry.critics.vars,
+                critics.train_states,
+                critics.vars,
                 critic_hidden_states,
                 truncated_critic_inputs,
                 is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
@@ -252,6 +244,74 @@ def env_step(
             is_leaf=lambda x: not isinstance(x, tuple)
     ) 
 
+    return bootstrapped_rewards
+
+
+def env_step(
+        env: Any, num_envs: int, gamma: float,       # partial() these in make_train()
+        carry: EnvStepCarry, step_rng: KeyArray     # remaining args after partial()
+        ) -> tuple[EnvStepCarry, Transition]:
+
+    reset_rngs, *action_rngs = jax.random.split(step_rng, env.num_agents+1)
+    reset_rngs = jax.random.split(reset_rngs, num_envs)
+
+    # Gather inputs to the actors
+    reset = jnp.logical_or(carry.terminal, carry.truncated)
+    actor_inputs = tuple(
+            ActorInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :]) 
+            for _ in range(env.num_agents)
+    )
+
+    # Actor forward pass
+    actor_hidden_states, policies = zip(*jax.tree_map(
+        lambda ts, vars, hs, ins: ts.apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
+            carry.actors.train_states,
+            carry.actors.vars,
+            carry.actor_hidden_states,
+            actor_inputs,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+    ))
+
+    # Sample actions and compute log_probs
+    actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
+    log_probs = jax.tree_map(lambda policy, action: policy.log_prob(action).squeeze(), policies, actions, is_leaf=lambda x: not isinstance(x, tuple))
+    environment_actions = jnp.concatenate(actions, axis=-1)
+
+    # Gather inputs to the critics
+    # BUG: debugging without opponent actions
+    critic_inputs = tuple(
+            CriticInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :])
+            for _ in range(env.num_agents)
+    )
+    # critic_inputs = tuple( # NOTE: trying out with current opponent action as opposed to previous (change: carry.actions to actions)
+    #         CriticInput(jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
+    #         carry.done[jnp.newaxis, :]) 
+    #         for i in range(env.num_agents)
+    # )
+
+    # Critic forward pass
+    critic_hidden_states, values = zip(*jax.tree_map(
+        lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
+            carry.critics.train_states,
+            carry.critics.vars,
+            carry.critic_hidden_states,
+            critic_inputs,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
+    ))
+    
+    # Step environment
+    environment_state, observation, terminal_observation, rewards, terminal, truncated = jax.vmap(
+            step_and_reset_if_done, 
+            in_axes=(None, 0, 0, 0),
+    )(env, reset_rngs, carry.environment_state, environment_actions)
+
+    # Normalize rewards (based on return standard deviations) 
+    rewards, returns, return_stats = normalize_rewards(rewards, terminal, truncated, carry.returns, carry.return_stats, gamma)
+
+    # Bootstrap value at truncations: reward = reward + gamma*terminal_value
+    # BUG: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
+    bootstrapped_rewards = rewards# bootstap_value_at_truncation(env, gamma, carry.critics, critic_hidden_states, terminal_observation, reset, rewards, truncated)
+
     transition = Transition(
             observation=carry.observation, 
             actions=actions, 
@@ -273,6 +333,7 @@ def env_step(
             terminal=terminal, 
             truncated=truncated, 
             returns=returns,
+            return_stats=return_stats,
             actors=carry.actors, 
             critics=carry.critics, 
             actor_hidden_states=actor_hidden_states, 
@@ -584,6 +645,7 @@ def train_step(
             terminal=env_final.terminal,
             truncated=env_final.truncated,
             returns=env_final.returns,
+            return_stats=env_final.return_stats,
             actors=epoch_final.actors, 
             critics=epoch_final.critics, 
             actor_hidden_states=env_final.actor_hidden_states, 
@@ -734,6 +796,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
         init_environment_state = (_environment_state[0].replace(time=start_times), _environment_state[1]) # TODO: make environment_state a NamedTuple
 
         init_returns = tuple(jnp.zeros(config.num_envs, dtype=jnp.float32) for _ in range(env.num_agents))
+        init_return_stats = tuple(RunningStats(jnp.zeros([1]), jnp.zeros([1]), 0, 1) for _ in range(env.num_agents))
         init_terminal = jnp.zeros(config.num_envs, dtype=bool)
         init_truncated = jnp.zeros(config.num_envs, dtype=bool)
         init_reset = jnp.logical_or(init_terminal, init_truncated)
@@ -759,9 +822,10 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
                 actions=init_actions, 
                 terminal=init_terminal, 
                 truncated=init_truncated,
+                returns=init_returns,
+                return_stats=init_return_stats,
                 actors=init_actors, 
                 critics=init_critics, 
-                returns=init_returns,
                 actor_hidden_states=init_actor_hidden_states, 
                 critic_hidden_states=init_critic_hidden_states, 
                 environment_state=init_environment_state, 

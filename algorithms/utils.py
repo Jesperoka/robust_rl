@@ -125,7 +125,7 @@ class TanhTransformedDistribution(TransformedDistribution):
 
 
 class RunningStats(NamedTuple):
-    mean_obs:       Array
+    mean_obs:       Array # TODO: rename to mean (since we're not just normalizing obs anymore)
     welford_S:      Array
     running_count:  int # must start at 1 if only updating during training (and not rollouts)
     first:          int 
@@ -143,12 +143,20 @@ def batch_welford_update(init_carry: tuple[Array, Array, int], x_batch: Array) -
     (M_new, S_new, count), _ = scan(welford_update, init_carry, x_batch)
     return (M_new, S_new, count)
 
+def update_stats(batch_input: Array, statistics: RunningStats):
+    mean_obs, welford_S, running_count, first = statistics 
+    stacked_input = batch_input.reshape(-1, batch_input.shape[-1]) # merge all leading dimensions (we assume input dimension is flat and last)
+    mean_input, welford_S, running_count = batch_welford_update((mean_obs, welford_S, running_count), stacked_input)
+
+    return mean_input, welford_S, running_count, first 
+
 
 # Input normalization using Welford algorithm for running statistics
 def update_and_normalize_input(obs: Array, statistics: RunningStats) -> tuple[Array, RunningStats]:
-    mean_obs, welford_S, running_count, first = statistics 
-    stacked_obs = obs.reshape(-1, obs.shape[-1]) # merge batch and env dimensions (we assume observation dimension is flat and last)
-    mean_obs, welford_S, running_count = batch_welford_update((mean_obs, welford_S, running_count), stacked_obs)
+    # mean_obs, welford_S, running_count, first = statistics 
+    # stacked_obs = obs.reshape(-1, obs.shape[-1]) # merge batch and env dimensions (we assume observation dimension is flat and last)
+    # mean_obs, welford_S, running_count = batch_welford_update((mean_obs, welford_S, running_count), stacked_obs)
+    mean_obs, welford_S, running_count, first = update_stats(obs, statistics)
     var = welford_S / (running_count - 1 + first)
     first = 0
 
@@ -204,11 +212,13 @@ class ActorRNN(Module):
         else:
             obs = normalize_input(obs, running_stats.value)                                 # type: ignore[assignment]
 
-        obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # BUG: testing with filter
+        obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # testing with filter
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(obs, update_stats=train)
         embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(obs)
         embedding = relu(embedding)
+        # embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(embedding)
+        # embedding = relu(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
@@ -248,23 +258,20 @@ class CriticRNN(Module):
         critic_obs, dones = x
         critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
 
-        debug.print("critic_obs before: {o}", o=critic_obs)
         # Input Normalization
         running_stats = self.variable("vars", "running_stats", init_fn=RunningStats, mean_obs=zeros(critic_obs.shape[-1]), welford_S=zeros(critic_obs.shape[-1]), running_count=1, first=1)
-        debug.print("running_stats: {r}", r=running_stats.value)
-        debug.print("train: {t}", t=train)
         if train:
             critic_obs, running_stats.value = update_and_normalize_input(critic_obs, running_stats.value)   # type: ignore[assignment]
         else:
             critic_obs = normalize_input(critic_obs, running_stats.value)                             # type: ignore[assignment]
 
-        debug.print("critic_obs after: {o}", o=critic_obs)
-
-        critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # BUG: testing with filter
+        critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # testing with filter
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(critic_obs, update_stats=train)
         embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
         embedding = relu(embedding)
+        # embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(embedding)
+        # embedding = relu(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
@@ -273,7 +280,7 @@ class CriticRNN(Module):
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
         embedding = relu(embedding)
 
-        value = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(-1.0))(embedding)
+        value = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(embedding)
         
         return hidden, squeeze(value, axis=-1) 
 
