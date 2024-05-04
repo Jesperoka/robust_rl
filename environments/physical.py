@@ -14,6 +14,7 @@ class PlayingArea:
     half_y_length:  float = 1.0 # m
     z_min:          float = 0.0 # m
     z_max:          float = 3.5 # m
+    floor_height:   float = 0.1 # m
 
 @dataclass(frozen=True)
 class PandaLimits:
@@ -155,6 +156,8 @@ class ZeusDimensions:
     l_x:    float = 0.11/2                      # m
     l_y:    float = 0.16/2                      # m
     l_diag: float = (l_x**2 + l_y**2)**(1/2)    # m
+
+    target_height: float = 0.13                 # m
 
 @dataclass(frozen=True)
 class ZeusLimits:

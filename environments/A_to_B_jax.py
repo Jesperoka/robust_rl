@@ -10,7 +10,7 @@ from jax import Array, numpy as jnp
 from chex import PRNGKey
 from mujoco.mjx import Model, Data, forward as mjx_forward, step as mjx_step 
 from environments.options import EnvironmentOptions 
-from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits
+from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits, ZeusDimensions
 
 
 # import pdb
@@ -201,7 +201,7 @@ class A_to_B:
             mjx_data = mjx_step(mjx_model, mjx_data.replace(ctrl=ctrl))
             return mjx_data, _ 
 
-        final_mjx_data, _ = jax.lax.scan(f, init_mjx_data, None, length=self.steps_per_ctrl)
+        final_mjx_data, _ = jax.lax.scan(f, init_mjx_data, None, length=self.steps_per_ctrl, unroll=False)
         return final_mjx_data
     
     def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
@@ -226,7 +226,7 @@ class A_to_B:
         arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False)
         zeus_reward, panda_reward = self.reward_fn(observation, action)
 
-        zeus_reward = zeus_reward # + car_goal_reward - car_outside_limits_reward # - 0.05*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
+        zeus_reward = zeus_reward + car_goal_reward - car_outside_limits_reward # - 0.05*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
         panda_reward = panda_reward # + arm_goal_reward #- car_goal_reward - arm_outside_limits_reward 
         reward = (zeus_reward, panda_reward)
 
@@ -262,10 +262,38 @@ class A_to_B:
         # Manually wrap car orienatation angle
         q_car = self.modulo_at_index(q_car, self.car_orientation_index, 2*pi) 
 
-        d_goal = jnp.array([jnp.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
+        # Corners of the playing area
+        corner_0 = jnp.array([self.car_limits.x_min, self.car_limits.y_min, self.playing_area.floor_height], dtype=jnp.float32)
+        corner_1 = jnp.array([self.car_limits.x_min, self.car_limits.y_max, self.playing_area.floor_height], dtype=jnp.float32)
+        corner_2 = jnp.array([self.car_limits.x_max, self.car_limits.y_min, self.playing_area.floor_height], dtype=jnp.float32)
+        corner_3 = jnp.array([self.car_limits.x_max, self.car_limits.y_max, self.playing_area.floor_height], dtype=jnp.float32)
+
+        # 2D Distance from car to the corners of the playing area
+        dcc_0 = jnp.linalg.norm(corner_0[0:2] - q_car[0:2], ord=2)
+        dcc_1 = jnp.linalg.norm(corner_1[0:2] - q_car[0:2], ord=2)
+        dcc_2 = jnp.linalg.norm(corner_2[0:2] - q_car[0:2], ord=2)
+        dcc_3 = jnp.linalg.norm(corner_3[0:2] - q_car[0:2], ord=2)
+
+        # 2D Distance from goal to the corners of the playing area
+        dgc_0 = jnp.linalg.norm(corner_0[0:2] - p_goal, ord=2)
+        dgc_1 = jnp.linalg.norm(corner_1[0:2] - p_goal, ord=2)
+        dgc_2 = jnp.linalg.norm(corner_2[0:2] - p_goal, ord=2)
+        dgc_3 = jnp.linalg.norm(corner_3[0:2] - p_goal, ord=2)
+
+        # 3D Distance from ball to the corners of the playing area
+        dbc_0 = jnp.linalg.norm(corner_0 - p_ball, ord=2)
+        dbc_1 = jnp.linalg.norm(corner_1 - p_ball, ord=2)
+        dbc_2 = jnp.linalg.norm(corner_2 - p_ball, ord=2)
+        dbc_3 = jnp.linalg.norm(corner_3 - p_ball, ord=2)
+            
+        # Distance from car to the goal
+        dc_goal = jnp.array([jnp.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
+
+        # Distance from ball to the car (target) 
+        db_target = jnp.linalg.norm(jnp.array([q_car[0], q_car[1], self.playing_area.floor_height + ZeusDimensions.target_height]) - p_ball[0:3], ord=2)
 
         obs = jnp.concatenate([
-            q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal
+            q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, dc_goal, #dcc_0, dcc_1, dcc_2, dcc_3, dgc_0, dgc_1, dgc_2, dgc_3
         ], axis=0)
 
         return obs

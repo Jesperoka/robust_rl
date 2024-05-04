@@ -40,7 +40,7 @@ from functools import partial
 from typing import Any, Callable, NamedTuple, TypeAlias 
 from environments.A_to_B_jax import A_to_B
 from algorithms.config import AlgorithmConfig
-from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, update_stats
+from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, update_stats, l1_loss, l2_loss
 from algorithms.visualize import PlotMetrics
 from multiprocessing import Queue
 from multiprocessing.queues import Full
@@ -306,7 +306,8 @@ def env_step(
     )(env, reset_rngs, carry.environment_state, environment_actions)
 
     # Normalize rewards (based on return standard deviations) 
-    rewards, returns, return_stats = normalize_rewards(rewards, terminal, truncated, carry.returns, carry.return_stats, gamma)
+    # WARNING: renaming output to disable
+    _rewards, returns, return_stats = normalize_rewards(rewards, terminal, truncated, carry.returns, carry.return_stats, gamma)
 
     # Bootstrap value at truncations: reward = reward + gamma*terminal_value
     # BUG: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
@@ -411,6 +412,7 @@ def actor_loss(
     gae = (minibatch_gae - minibatch_gae.mean()) / (minibatch_gae.std() + 1e-8)
 
     actor_loss, entropy = loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng)
+    #actor_loss = actor_loss + l1_loss(params["Dense_0"]["kernel"]) + sum(l2_loss(w) for w in jax.tree_leaves(params)) # WARNING: l2: this penalizes bias as well
 
     return actor_loss, (entropy, updated_vars["vars"])
 
@@ -431,13 +433,13 @@ def critic_loss(
 
     def loss(value, minibatch_value, minibatch_target):
         ### Value clipping 
-        value_pred_clipped = minibatch_value + jnp.clip(value - minibatch_value, -clip_eps, clip_eps)
-        value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
-        value_losses_unclipped = jnp.square(value - minibatch_target)
-        value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()
+        # value_pred_clipped = minibatch_value + jnp.clip(value - minibatch_value, -clip_eps, clip_eps)
+        # value_losses_clipped = jnp.square(value_pred_clipped - minibatch_target)
+        # value_losses_unclipped = jnp.square(value - minibatch_target)
+        # value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()
 
         ### Without Value clipping
-        # value_losses = jnp.square(value - minibatch_target).mean()
+        value_losses = jnp.square(value - minibatch_target).mean()
 
         return vf_coef*value_losses
     
@@ -450,6 +452,7 @@ def critic_loss(
     value = value.squeeze()
 
     critic_loss = loss(value, minibatch_value, minibatch_target)
+    #critic_loss = critic_loss + l1_loss(params["Dense_0"]["kernel"]) + sum(l2_loss(w) for w in jax.tree_leaves(params))
 
     return critic_loss, updated_vars["vars"]
 
@@ -559,7 +562,7 @@ def gradient_epoch_step(
     minibatches = shuffled_minibatches_fn(batch, epoch_rng)
     minibatch_carry = MinibatchCarry(carry.actors, carry.critics, minibatch_rng)
 
-    minibatch_final, minibatch_metrics = jax.lax.scan(gradient_minibatch_step_fn, minibatch_carry, minibatches)
+    minibatch_final, minibatch_metrics = jax.lax.scan(gradient_minibatch_step_fn, minibatch_carry, minibatches, unroll=False)
 
     carry = EpochCarry(
             minibatch_final.actors, 
@@ -586,7 +589,7 @@ def train_step(
     step_rngs = jax.random.split(step_rngs, num_env_steps)
     epoch_rngs = jax.random.split(train_step_rngs, num_gradient_epochs)
 
-    env_final, trajectory = jax.lax.scan(env_step_fn, carry.env_step_carry, step_rngs, num_env_steps)
+    env_final, trajectory = jax.lax.scan(env_step_fn, carry.env_step_carry, step_rngs, num_env_steps, unroll=False)
     
     # BUG: debugging without opponent action
     final_reset = jnp.logical_or(env_final.terminal, env_final.truncated)
@@ -630,7 +633,7 @@ def train_step(
             targets=targets
     )
 
-    epoch_final, epoch_metrics = jax.lax.scan(gradient_epoch_step_fn, epoch_carry, epoch_rngs, num_gradient_epochs)
+    epoch_final, epoch_metrics = jax.lax.scan(gradient_epoch_step_fn, epoch_carry, epoch_rngs, num_gradient_epochs, unroll=False)
 
     # TODO: rework
     train_step_metrics = TrainStepMetrics(
@@ -839,7 +842,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
         # Run the training loop
         # -------------------------------------------------------------------------------------------------------
-        train_final, metrics = jax.lax.scan(train_step_fn, train_step_carry, train_step_rngs, config.num_updates)
+        train_final, metrics = jax.lax.scan(train_step_fn, train_step_carry, train_step_rngs, config.num_updates, unroll=False)
         # -------------------------------------------------------------------------------------------------------
 
         return train_final, metrics
@@ -885,8 +888,8 @@ def main():
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
-    num_envs = 48 
-    minibatch_size = 12 
+    num_envs = 4096 
+    minibatch_size = 64 
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = car_only_negative_distance,
@@ -909,25 +912,25 @@ def main():
 
     # TODO: run JaxMarl and/or Mava and compare value loss numbers
     config: AlgorithmConfig = AlgorithmConfig(
-        lr              = 2.0e-3, #3.0e-4,
+        lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
-        num_env_steps   = 128,
+        num_env_steps   = 3,
         # total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
         total_timesteps = 20_971_520,
         # total_timesteps = 2_097_152,
-        update_epochs   = 4,
+        update_epochs   = 5,
         num_minibatches = num_envs // minibatch_size,
         gamma           = 0.99,
-        gae_lambda      = 0.95,
-        clip_eps        = 0.2, 
+        gae_lambda      = 0.90,
+        clip_eps        = 0.3, 
         scale_clip_eps  = False,
-        ent_coef        = 0.01,
+        ent_coef        = 0.001,
         vf_coef         = 0.5,
         max_grad_norm   = 0.5,
         env_name        = "A_to_B_jax",
-        rnn_hidden_size = 128,
-        rnn_fc_size     = 128 
+        rnn_hidden_size = 8,
+        rnn_fc_size     = 64 
     )
 
     config.num_actors = config.num_envs # env.num_agents * config.num_envs

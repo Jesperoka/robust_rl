@@ -2,12 +2,12 @@ from flax.training.train_state import TrainState
 from jax import Array, debug 
 from jax._src.random import KeyArray
 from jax.lax import scan, cond
-from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, ones_like, logical_and, exp, concatenate, sqrt
+from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, ones_like, logical_and, exp, concatenate, sqrt, abs as jnp_abs, sign
 from jax.random import PRNGKey, split
 from distrax import Transformed, ScalarAffine, Beta
 from tensorflow_probability.substrates.jax.bijectors import Tanh 
 from tensorflow_probability.substrates.jax.distributions import Independent, Normal, TransformedDistribution, Distribution
-from flax.linen import FrozenDict, SpectralNorm, compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize 
+from flax.linen import FrozenDict, SpectralNorm, compact, Module, GRUCell, scan as nn_scan, Dense, relu, softplus, standardize, tanh, LayerNorm
 from flax.linen.initializers import constant, orthogonal
 from functools import partial
 from typing import Any, Callable, Iterable, NamedTuple, Optional
@@ -188,6 +188,19 @@ class ScannedRNN(Module):
     def initialize_carry(batch_size: int, hidden_size: int) -> Array:
         return GRUCell(features=hidden_size).initialize_carry(PRNGKey(0), (batch_size, hidden_size)) # Use a dummy key since the default state init fn is just zeros.
 
+# L1 regularization loss
+def l1_loss(weights: Array, alpha_1: float=0.01) -> Array:
+    return alpha_1 * jnp_abs(weights).mean()
+
+# L2 regularization loss
+def l2_loss(weights: Array, alpha_2: float=0.001) -> Array:
+    return alpha_2 * (weights**2).mean()
+
+def symlog(x: Array) -> Array:
+    return sign(x)*log(1.0 + jnp_abs(x))
+
+def symexp(x: Array) -> Array:
+    return sign(x)*(exp(jnp_abs(x)) - 1.0)
 
 SpecNorm = partial(SpectralNorm, collection_name="vars")
 
@@ -216,16 +229,16 @@ class ActorRNN(Module):
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(obs, update_stats=train)
         embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(obs)
-        embedding = relu(embedding)
-        # embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(embedding)
-        # embedding = relu(embedding)
+        embedding = LayerNorm()(embedding)
+        embedding = tanh(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
 
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
-        embedding = relu(embedding)
+        embedding = LayerNorm()(embedding)
+        embedding = tanh(embedding)
 
         # https://arxiv.org/pdf/2111.02202.pdf
         # _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)) + 1.0
@@ -234,10 +247,11 @@ class ActorRNN(Module):
         # beta = clip(_beta, 1.0, 1000.0)
         # policy = JointScaledBeta(alpha, beta, -1.0, 2.0)
 
-        mu = Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
-        log_std = Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)    # State dependent log_std
-        # log_std = self.param("log_std", init_fn=lambda rng: zeros(self.action_dim))                             # State independent log_std
-        std = exp(clip(log_std, -20.0, 0.1))
+        mu = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.0))(embedding)
+        not_really_log_std = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.771))(embedding)    # State dependent log_std
+        std = softplus(not_really_log_std)
+        # log_std = self.param("log_std", init_fn=lambda rng: -0.693*ones(self.action_dim))                          # State independent log_std
+        # std = exp(clip(log_std, -20.0, 0.1))
 
         policy = Independent(TanhTransformedDistribution(Normal(mu, std)), reinterpreted_batch_ndims=1)
 
@@ -268,19 +282,19 @@ class CriticRNN(Module):
         critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # testing with filter
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(critic_obs, update_stats=train)
-        embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
-        embedding = relu(embedding)
-        # embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(embedding)
-        # embedding = relu(embedding)
+        embedding = Dense(2*self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
+        embedding = LayerNorm()(embedding)
+        embedding = tanh(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
         
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
-        embedding = relu(embedding)
+        embedding = LayerNorm()(embedding)
+        embedding = tanh(embedding)
 
-        value = Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(embedding)
+        value = Dense(1, kernel_init=orthogonal(0.1), bias_init=constant(0.0))(embedding)
         
         return hidden, squeeze(value, axis=-1) 
 
@@ -337,7 +351,7 @@ def initialize_actors(
             TrainState.create(
                 apply_fn=network.apply,
                 params=var_dict["params"], 
-                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-7))
                 ) for network, var_dict in zip(actor_networks, actor_network_variable_dicts)),
         vars=tuple(var_dict["vars"] for var_dict in actor_network_variable_dicts)
     )
@@ -378,7 +392,7 @@ def initialize_critics(
             TrainState.create(
                 apply_fn=network.apply, 
                 params=var_dict["params"], 
-                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-5))
+                tx=chain(clip_by_global_norm(max_grad_norm), adam(learning_rate, eps=1e-7))
             ) for network, var_dict in zip(critic_networks, critic_network_variable_dicts)),
         vars=tuple(var_dict["vars"] for var_dict in critic_network_variable_dicts)
     )
