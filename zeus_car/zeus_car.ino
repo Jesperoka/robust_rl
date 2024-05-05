@@ -38,6 +38,13 @@ int freeMemory() {
 
 Esp32Listener esp_listener;
 
+Action prev_action = Action{
+    angle:      0.0,
+    velocity:   0.0,
+    rot_vel:    0.0,
+};
+Mode prev_mode = Mode::STANDBY;
+
 
 void setup() {
     SoftPWMBegin();
@@ -52,27 +59,51 @@ void setup() {
 void loop() {
     uint32_t time = millis();
     auto [action, mode] = esp_listener.listen();
-    Serial.println(action.angle);
-    Serial.println(action.velocity);
-    Serial.println(action.rot_vel);
-    Serial.println((int)mode);
+    // Serial.println(action.angle);
+    // Serial.println(action.velocity);
+    // Serial.println(action.rot_vel);
+    // Serial.println((int)mode);
 
     switch (mode) {
         case Mode::STANDBY:
             stop_motors();
             rgb_write(PURPLE);
+            prev_action = action;
+            prev_mode = mode;
             break;
 
         case Mode::ACT:
             move(action);
             rgb_write(GREEN);
-            // delay(1000);
+            prev_action = action;
+            prev_mode = mode;
+            delay(100);
             break;
-    }
 
+        case Mode::CONTINUE:
+            if (prev_mode == Mode::ACT) {
+                move(prev_action);
+                rgb_write(ORANGE);
+                delay(100);
+            } else if (prev_mode == Mode::STANDBY) {
+                stop_motors();
+                rgb_write(BLUE);
+            }
+            break;
+
+        default:
+            stop_motors();
+            rgb_write(RED);
+            prev_action = Action{
+                angle:      0.0,
+                velocity:   0.0,
+                rot_vel:    0.0,
+            };
+            prev_mode = Mode::STANDBY;
+
+    }
     while (millis() - time < LOOP_DELAY) {  }
 }
- 
 
 
 

@@ -58,9 +58,15 @@ Message Esp32Listener::listen() {
         rx_buffer = strip_header(rx_buffer, '+'); // NOTE: hardcoded header delimiter
         return parse_message(rx_buffer, DELIMITER);
     }
-    // NOTE: might need to add a third Mode for continuing the previous action
-    // (and I might also want to add a newest version counter)
-    return Message{}; 
+
+    return Message{
+        action: (Action){
+            angle:      0.0,
+            velocity:   0.0,
+            rot_vel:    0.0,
+        }, 
+        mode: Mode::CONTINUE,
+    }; 
 }
 
 

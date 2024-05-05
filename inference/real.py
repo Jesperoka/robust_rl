@@ -146,7 +146,15 @@ def observe_car(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt):
     # Compute the relative pose of the car with respect to the ground frame
     car_t_ground_frame = ground_R.T @ (car_t - ground_t)
     car_R_ground_frame = ground_R.T @ car_R
-    theta = np.arccos(0.5 * (np.trace(car_R_ground_frame) - 1.0))
+    # theta = np.arccos(0.5 * (np.trace(car_R_ground_frame) - 1.0))
+
+    OFFSET = -np.pi/2.0
+
+    x_dir = np.array((1.0, 0.0))
+    x_dir_rotated = car_R_ground_frame[0:2, 0:2] @ x_dir # approximate rotation about z-axis
+    theta = np.arctan2(x_dir_rotated[1]*x_dir[0] - x_dir_rotated[0]*x_dir[1], x_dir_rotated[0]*x_dir[0] + x_dir_rotated[1]*x_dir[1])
+    theta = np.mod(theta + OFFSET, 2*np.pi)
+    # theta = np.arccos(np.dot(x_dir, x_dir_rotated) / (np.linalg.norm(x_dir, ord=2)*np.linalg.norm(x_dir_rotated, ord=2)))
 
     q_car = np.array((-car_t_ground_frame[0][0], car_t_ground_frame[1][0], theta)) # car_x == cam_z, car_y == -cam_x
     qd_car = (finite_difference(q_car, prev_q_car, dt) + prev_qd_car ) / 2.0 # Average of previous computed velocity and positional finite differences
@@ -185,19 +193,31 @@ def observe(
 
     return obs, aux
 
+# Zeus Modes
+STANDBY = 0
+ACT = 1 
+CONTINUE = 2 # don't need to send
 
 async def websocket_client(queue, uri="ws://192.168.4.1:8765"): # ESP32-CAM IP address when it creates an Access Point
-    last_message = {} 
-    async with websockets.connect(uri) as websocket:
-        while True:
-            if not queue.empty():
-                message = queue.get_nowait()
-                last_message = message
-            else:
-                message = last_message
+    done = {"A": 0, "B": 0, "C": 0, "D": STANDBY}
+    async for websocket in websockets.connect(uri):
+        try:
+            print("\nConnected to Zeus Car.\n")
+            while True:
+                if not queue.empty():
+                    message = queue.get_nowait()
 
-            await websocket.send(dumps(message) + ">")
-            await asyncio.sleep(0.005)
+                    if message is None:
+                        await websocket.send(dumps(done) + ">")
+                        return None
+
+                    await websocket.send(dumps(message) + ">") 
+
+                await asyncio.sleep(0.005)
+
+        except websockets.ConnectionClosed:
+            print("\nConnection with Zeus Car lost.\n")
+
 
 
 def main():
@@ -240,53 +260,62 @@ def main():
     frame = pipe.wait_for_frames().get_infrared_frame()
 
     car_command_queue = asyncio.Queue()
-    loop = asyncio.get_event_loop()
-    loop.create_task(websocket_client(car_command_queue))
+    print("Running Zeus websocket client ...")
 
-    print("Running april-tag detection...\nPress 'q' to exit")
-    done = False
-    while not done:
-        observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, ctrl_time) 
-        (q_car, _, _, _, qd_car, *_) = env.decode_observation(observation)
-        prev_q_car = q_car
-        prev_qd_car = qd_car
+    async def loop_body():
+        nonlocal pipe, car_R, car_t, prev_q_car, prev_qd_car, actor_hidden_states, frame
 
-        terminal = np.array([False])
-        actions, actor_hidden_states = jit(policy_inference, static_argnums=0)(num_agents, actors, actor_hidden_states, observation, terminal)
-        action = np.concatenate(actions, axis=-1)
+        print("Running april-tag detection...\nPress 'q' to exit")
+        done = False
+        while not done:
+            observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, ctrl_time) 
+            (q_car, _, _, _, qd_car, *_) = env.decode_observation(observation)
+            prev_q_car = q_car
+            prev_qd_car = qd_car
 
-        car_orientation = q_car[2]
+            terminal = np.array([False])
+            actions, actor_hidden_states = jit(policy_inference, static_argnums=0)(num_agents, actors, actor_hidden_states, observation, terminal)
+            action = np.concatenate(actions, axis=-1)
 
-        print(f"Car x: {q_car[0]}, Car y: {q_car[1]}, Car theta: {q_car[2]}")
+            car_orientation = q_car[2]
 
-        ctrl = jit(env.compute_controls)(car_orientation, observation, action)
-        
-        car_command = {"A": ctrl[0], "B": ctrl[1], "C": ctrl[2], "D": 1 }
-        car_command_queue.put_nowait(car_command)
+            print(f"Car x: {q_car[0]}, Car y: {q_car[1]}, Car theta: {q_car[2]}")
 
-        start_ns = monotonic_ns()
-        while monotonic_ns() - start_ns < ctrl_time_ns:
+            ctrl = jit(env.compute_controls)(car_orientation, observation, action)
+            
+            car_command = {"A": float(ctrl[0]), "B": float(ctrl[1]), "C": float(ctrl[2]), "D": ACT}
+            car_command_queue.put_nowait(car_command)
 
-            _frame = pipe.wait_for_frames().get_infrared_frame()
-            frame = _frame if _frame else frame
+            start_ns = monotonic_ns()
+            while monotonic_ns() - start_ns < ctrl_time_ns:
 
-            image = np.asarray(frame.data, dtype=np.uint8)
-            detections: list[Detection] = detector.detect(image, estimate_tag_pose=True, camera_params=cam_params, tag_size=0.14) # type: ignore[assignment]
+                _frame = pipe.wait_for_frames().get_infrared_frame()
+                frame = _frame if _frame else frame
 
-            if len(detections) > 0:
-                car_R = detections[0].pose_R
-                car_t = detections[0].pose_t
+                image = np.asarray(frame.data, dtype=np.uint8)
+                detections: list[Detection] = detector.detect(image, estimate_tag_pose=True, camera_params=cam_params, tag_size=0.14) # type: ignore[assignment]
 
-            frame = draw_axes(image, car_R, car_t, K)
+                if len(detections) > 0:
+                    car_R = detections[0].pose_R
+                    car_t = detections[0].pose_t
 
-            print("\n\n::::: ", car_R, car_t, " :::::\n\n")
+                frame = draw_axes(image, car_R, car_t, K)
+                # print("\n\n::::: ", car_R, car_t, " :::::\n\n")
 
+                cv2.imshow("image", image)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Exiting...")
+                    car_command_queue.put_nowait(None)
+                    done = True 
 
-            cv2.imshow("image", image)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("Exiting...")
-                done = True 
+                await asyncio.sleep(0.0005)
 
+        return None
+
+    async def gather():
+        res = await asyncio.gather(loop_body(), websocket_client(car_command_queue))
+
+    asyncio.run(gather())
     pipe.stop()
 
 

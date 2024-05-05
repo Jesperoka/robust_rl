@@ -6,6 +6,7 @@
 enum class Mode : uint8_t {
     STANDBY = 0,
     ACT = 1,
+    CONTINUE = 2,
 };
 
 typedef struct {
