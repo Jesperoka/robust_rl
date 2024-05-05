@@ -2,7 +2,7 @@ from flax.training.train_state import TrainState
 from jax import Array, debug 
 from jax._src.random import KeyArray
 from jax.lax import scan, cond
-from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, ones_like, logical_and, exp, concatenate, sqrt, abs as jnp_abs, sign
+from jax.numpy import sum as jnp_sum, where, newaxis, mean, zeros_like, squeeze, clip, zeros, log, ones_like, logical_and, exp, concatenate, sqrt, abs as jnp_abs, sign, log1p, expm1 
 from jax.random import PRNGKey, split
 from distrax import Transformed, ScalarAffine, Beta
 from tensorflow_probability.substrates.jax.bijectors import Tanh 
@@ -189,7 +189,7 @@ class ScannedRNN(Module):
         return GRUCell(features=hidden_size).initialize_carry(PRNGKey(0), (batch_size, hidden_size)) # Use a dummy key since the default state init fn is just zeros.
 
 # L1 regularization loss
-def l1_loss(weights: Array, alpha_1: float=0.01) -> Array:
+def l1_loss(weights: Array, alpha_1: float=0.001) -> Array:
     return alpha_1 * jnp_abs(weights).mean()
 
 # L2 regularization loss
@@ -197,10 +197,10 @@ def l2_loss(weights: Array, alpha_2: float=0.001) -> Array:
     return alpha_2 * (weights**2).mean()
 
 def symlog(x: Array) -> Array:
-    return sign(x)*log(1.0 + jnp_abs(x))
+    return sign(x)*log1p(jnp_abs(x))
 
 def symexp(x: Array) -> Array:
-    return sign(x)*(exp(jnp_abs(x)) - 1.0)
+    return sign(x)*expm1(jnp_abs(x))
 
 SpecNorm = partial(SpectralNorm, collection_name="vars")
 
@@ -216,16 +216,17 @@ class ActorRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], train: bool) -> tuple[Array, Distribution]: # type: ignore[override]
         obs, dones = x
-        obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
+        # obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
+        # obs = symlog(obs)
 
         # Input Normalization
         running_stats = self.variable("vars", "running_stats", init_fn=RunningStats, mean_obs=zeros(obs.shape[-1]), welford_S=zeros(obs.shape[-1]), running_count=1, first=1)
-        if train:
-            obs, running_stats.value = update_and_normalize_input(obs, running_stats.value) # type: ignore[assignment]
-        else:
-            obs = normalize_input(obs, running_stats.value)                                 # type: ignore[assignment]
+        # if train:
+        #     obs, running_stats.value = update_and_normalize_input(obs, running_stats.value) # type: ignore[assignment]
+        # else:
+        #     obs = normalize_input(obs, running_stats.value)                                 # type: ignore[assignment]
 
-        obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # testing with filter
+        # obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # testing with filter
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(obs, update_stats=train)
         embedding = Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(obs)
@@ -233,7 +234,7 @@ class ActorRNN(Module):
         embedding = tanh(embedding)
 
         rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        hidden, embedding = SpecNorm(ScannedRNN(hidden_size=self.hidden_size))(hidden, rnn_in, update_stats=train)
 
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
@@ -270,16 +271,17 @@ class CriticRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], train: bool) -> tuple[Array, Array]: # type: ignore[override]
         critic_obs, dones = x
-        critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        # critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        # critic_obs = symlog(critic_obs)
 
         # Input Normalization
         running_stats = self.variable("vars", "running_stats", init_fn=RunningStats, mean_obs=zeros(critic_obs.shape[-1]), welford_S=zeros(critic_obs.shape[-1]), running_count=1, first=1)
-        if train:
-            critic_obs, running_stats.value = update_and_normalize_input(critic_obs, running_stats.value)   # type: ignore[assignment]
-        else:
-            critic_obs = normalize_input(critic_obs, running_stats.value)                             # type: ignore[assignment]
+        # if train:
+        #     critic_obs, running_stats.value = update_and_normalize_input(critic_obs, running_stats.value)   # type: ignore[assignment]
+        # else:
+        #     critic_obs = normalize_input(critic_obs, running_stats.value)                             # type: ignore[assignment]
 
-        critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # testing with filter
+        # critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # testing with filter
 
         # embedding = SpecNorm(Dense(self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0)))(critic_obs, update_stats=train)
         embedding = Dense(2*self.dense_size, kernel_init=orthogonal(sqrt(2)), bias_init=constant(0.0))(critic_obs)
@@ -287,7 +289,7 @@ class CriticRNN(Module):
         embedding = tanh(embedding)
 
         rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
+        hidden, embedding = SpecNorm(ScannedRNN(hidden_size=self.hidden_size))(hidden, rnn_in, update_stats=train)
         
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)

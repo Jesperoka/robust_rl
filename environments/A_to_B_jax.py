@@ -49,7 +49,7 @@ class A_to_B:
 
     def __init__(self, mjx_model: Model, mjx_data: Data, grip_site_id: int, options: EnvironmentOptions) -> None:
         self.mjx_model: Model = mjx_model
-        self.mjx_data: Data = mjx_data 
+        # self.mjx_data: Data = mjx_data 
         self.grip_site_id: int = grip_site_id
 
         self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)

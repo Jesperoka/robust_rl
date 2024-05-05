@@ -50,26 +50,15 @@ import pdb
 # Misc
 # TODO: clean up old commented code once everything is working
 # TODO: rework TrainStepMetrics for plotting in the report 
-
-# (WIP)            # TODO: merge running_stats and batch_stats
-
-# REJECTED: code quality -
-#       - refactor from:    ((a1.v1, a2.v1), (a1.v2, a2.v2), (a1.v3, a2.v3)) 
-#       - to:               ((a1.v1, a1.v2, a1.v3), (a2.v1, a2.v2, a2.v3))
+# TODO: add num_actors/num_critics to MultiActorRNN/MultiCriticRNN
 
 # RL performance
-# TODO: normalize gae based on whole batch
-# TODO: normalize rewards
-# TODO: ensure input standard-normalization is correct
-# TODO: add layer norm
-# TODO: try LSTM instead of GRU
-# TODO: make log_std a state-independent parameter
+# TODO: try AdaBelief optimizer (just out of curiosity)
+# TODO: try SGD, apparently it's better for larger batch sizes than the Ada familiy 
 # TODO: experiment with KL divergence penalty instead of ratio clipping
 # TODO: experiment with cyclic learning rate
 # TODO: improve observation filtering
-# TODO: investigate once again if there is something wrong with the terminal masking
 # TODO: investigate once again the truncation value bootstrapping (should be better with reward normalization)
-# TODO: predict normalized values
 # TODO: add relative distances to observations
 
 # Controllers
@@ -308,6 +297,7 @@ def env_step(
     # Normalize rewards (based on return standard deviations) 
     # WARNING: renaming output to disable
     _rewards, returns, return_stats = normalize_rewards(rewards, terminal, truncated, carry.returns, carry.return_stats, gamma)
+    # rewards = symlog(rewards)
 
     # Bootstrap value at truncations: reward = reward + gamma*terminal_value
     # BUG: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
@@ -412,7 +402,7 @@ def actor_loss(
     gae = (minibatch_gae - minibatch_gae.mean()) / (minibatch_gae.std() + 1e-8)
 
     actor_loss, entropy = loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng)
-    #actor_loss = actor_loss + l1_loss(params["Dense_0"]["kernel"]) + sum(l2_loss(w) for w in jax.tree_leaves(params)) # WARNING: l2: this penalizes bias as well
+    actor_loss = actor_loss + l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params)) # WARNING: l2: this penalizes bias as well
 
     return actor_loss, (entropy, updated_vars["vars"])
 
@@ -452,7 +442,7 @@ def critic_loss(
     value = value.squeeze()
 
     critic_loss = loss(value, minibatch_value, minibatch_target)
-    #critic_loss = critic_loss + l1_loss(params["Dense_0"]["kernel"]) + sum(l2_loss(w) for w in jax.tree_leaves(params))
+    critic_loss = critic_loss + l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params))
 
     return critic_loss, updated_vars["vars"]
 
@@ -910,7 +900,6 @@ def main():
 
     rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
-    # TODO: run JaxMarl and/or Mava and compare value loss numbers
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
@@ -929,7 +918,7 @@ def main():
         vf_coef         = 0.5,
         max_grad_norm   = 0.5,
         env_name        = "A_to_B_jax",
-        rnn_hidden_size = 8,
+        rnn_hidden_size = 32, # 8
         rnn_fc_size     = 64 
     )
 
@@ -977,10 +966,10 @@ def main():
     env_final, step = train_final
     print("\n\nstep:", step)
 
-    checkpointer = Checkpointer(PyTreeCheckpointHandler())
 
     print("\n\nsaving actors...\n")
-    restore_args = checkpoint_utils.construct_restore_args(env_final.actors)
+    # restore_args = checkpoint_utils.construct_restore_args(env_final.actors)
+    checkpointer = Checkpointer(PyTreeCheckpointHandler())
     checkpointer.save(join(CHECKPOINT_DIR,"checkpoint_TEST"), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     print("\n...actors saved.\n\n")
 

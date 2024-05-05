@@ -15,7 +15,7 @@
 #define PASSWORD "12345678"
 #define PORT "8765"
 
-#define LOOP_DELAY 500
+#define LOOP_DELAY 5
 
 
 #ifdef __arm__
@@ -66,7 +66,7 @@ void loop() {
         case Mode::ACT:
             move(action);
             rgb_write(GREEN);
-            delay(1000);
+            // delay(1000);
             break;
     }
 
