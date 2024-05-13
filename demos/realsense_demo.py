@@ -5,6 +5,7 @@ from pupil_apriltags import Detector, Detection
 
 from pprint import pprint
 
+
 def draw_axis(img, R, t, K):
     rotV, _ = cv2.Rodrigues(R)
     points = np.float32([[0.1, 0, 0], [0, 0.1, 0], [0, 0, -0.1], [0, 0, 0]]).reshape(-1, 3) # inverted z axis
@@ -57,9 +58,9 @@ if __name__ == "__main__":
         families="tag36h11",
         nthreads=1,
         quad_decimate=0.0,
-        quad_sigma=2.0,
-        refine_edges=1,
-        decode_sharpening=0.25,
+        quad_sigma=0.0,
+        refine_edges=0,
+        decode_sharpening=0.0
     )
 
     print("Running april-tag detection...\nPress 'q' to exit")
@@ -69,7 +70,7 @@ if __name__ == "__main__":
         if not frame: continue
 
         image = np.asarray(frame.data, dtype=np.uint8)
-        detection: Detection = detector.detect(image, estimate_tag_pose=True, camera_params=CAMERA_PARAMS, tag_size=0.14)
+        detection: Detection = detector.detect(image, estimate_tag_pose=True, camera_params=CAMERA_PARAMS, tag_size=0.186)
 
         if len(detection) > 0:
             R = detection[0].pose_R

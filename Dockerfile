@@ -37,7 +37,9 @@ RUN apt-get install -y \
     libglfw3-dev \
     libgl1-mesa-dev \
     libglu1-mesa-dev \
-    v4l-utils
+    v4l-utils \
+    gettext \
+    udev 
 
 # Make python 3.12 the only python
 RUN rm -f /usr/bin/python3
@@ -58,10 +60,6 @@ RUN cd libfranka\
 
 # panda-python 0.7.5 for libfranka 0.9.2 and python 3.11 (which we hope works for python 3.12 as well)
 WORKDIR /
-#RUN apt-get install -y wget unzip
-#RUN wget https://github.com/JeanElsner/panda-py/releases/download/v0.7.5/panda_py_0.7.5_libfranka_0.9.2.zip
-#RUN unzip panda_py_0.7.5_libfranka_0.9.2.zip
-#RUN pip install panda_python-0.7.5+libfranka.0.9.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl --break-system-packages
 RUN git clone https://github.com/JeanElsner/panda-py.git
 RUN cd panda-py\
  && rm pyproject.toml
@@ -71,8 +69,6 @@ RUN cd panda-py\
  && pip install . --break-system-packages
 RUN rm -rf panda-py
 WORKDIR /
-
-RUN apt-get install -y udev
 
 # Librealsense (built from souce for python 3.12)
 # Note: disabling easylogging will break build. Might work on development branch though.
@@ -99,6 +95,7 @@ RUN cd librealsense \
  && make clean \
  && make \
  && make install
+ENV PYTHONPATH=$PYTHONPATH:/librealsense/build/Release
 WORKDIR /
 
 # Pip install jax (Lab PC does not have a GPU)
@@ -107,15 +104,31 @@ RUN pip install --upgrade --break-system-packages "jax[cpu]"
 # Other python dependencies
 RUN pip install --upgrade --break-system-packages \
     numpy \
-    matplotlib
+    matplotlib \
+    opencv-python \
+    pupil-apriltags \
+    mujoco-mjx
 
 # Neovim for development (remove this if you're not planning on using neovim to develop on the lab computer)
 WORKDIR /
 RUN git clone https://github.com/neovim/neovim
-RUN apt-get install -y gettext
 RUN cd neovim\
  && make CMAKE_BUILD_TYPE=RelWithDebInfo \
  && make install
+
+WORKDIR /
+RUN apt install ripgrep
+RUN cd ~ \
+ && mkdir .config \ 
+ && cd .config \
+ && git clone https://github.com/ThePrimeagen/neovimrc.git \
+ && mv neovimrc/ nvim/ \
+ && cd /root \
+ && mkdir personal \
+ && cd personal \
+ && git clone https://github.com/ThePrimeagen/harpoon.git \ 
+ && cd harpoon \
+ && git switch harpoon2
 
 
 

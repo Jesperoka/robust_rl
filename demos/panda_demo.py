@@ -1,10 +1,13 @@
 import panda_py
 import numpy as np
+from os.path import abspath, dirname, join
 
 SHOP_FLOOR_IP = "10.0.0.2"  # hostname for the workshop floor, i.e. the Franka Emika Desk
 ROBOT_IP = "192.168.0.1"    # don't know if we ever need robot IP
 
-with open('sens.txt', 'r') as file:
+filepath = abspath(join(dirname(__file__), "../", "sens.txt"))
+
+with open(filepath, 'r') as file:
     username = file.readline().strip()
     password = file.readline().strip()
 
@@ -15,13 +18,18 @@ if __name__ == "__main__":
     # Connect to the robot
     desk = panda_py.Desk(SHOP_FLOOR_IP, username, password)
 
-    input("Press any key to unlock FCI")
+    while not desk.has_control():
+        key = input("Another user has control\nPress any key (except q) when control has been relinquished to unlock FCI.\nOr press q to exit: ")
+        if key == "q": exit(0)
+        desk.take_control()
 
-    #desk.unlock()       # don't need if already unlocked
+    print("Unlocking joints if locked")
+    desk.unlock()       # don't need if already unlocked
+
+    print("Activating FCI")
     desk.activate_fci() # don't need if already activated
 
-    input("Press any key to connect to Robot")
-
+    print("Conneting to Panda")
     panda = panda_py.Panda(SHOP_FLOOR_IP)
 
     # Define some joint positions pretty close to panda_py.constants.JOINT_POSITION_START
@@ -57,3 +65,9 @@ if __name__ == "__main__":
 
     # Move back to the neutral position
     panda.move_to_start()
+
+    # Relinquish control
+    desk.deactivate_fci()
+    desk.release_control()
+
+
