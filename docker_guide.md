@@ -38,7 +38,7 @@ docker run -it \
 
 2. Clone `robust_rl/` inside `~/thesis/`
 
-3. While in `robust_rl/`, build container from dockerfile by running:
+3. While in `robust_rl/`, build container from dockerfile by running (here, `robust` is the name we give to the container):
 ```sh
 docker build -t robust .
 ```
@@ -46,16 +46,16 @@ docker build -t robust .
 ```sh
 xhost +local:docker
 ```
-#### Running
+#### Running the container
 
 Run the following command from ~\~/robodart/~ `robust_rl/`:
 ```sh
 docker run -it --net=host --privileged --mount type=bind,source=$(pwd)/robodart_exploration,target=/robodart_exploration robust:latest
 ```
+or to enable X11 graphics:
 ```sh
 docker run -e DISPLAY=$DISPLAY  -v /tmp/.X11-unix:/tmp/.X11-unix -it --net=host --privileged --mount type=bind,source=$(pwd),target=/robust_rl robust:latest
 ```
-
 
 and **while in the docker container** you can navigate to `robust_rl/`:
 ```sh
@@ -75,7 +75,7 @@ While `docker run` creates and then starts a container. A stopped container be s
 ```sh
 docker start -a -i name_of_container
 ```
-where `name_of_container` can be specified during creation, or they will be pseudo-randomly created and you can run:
+where `name_of_container` can be specified during creation using the `--name <name>` option, or they will be pseudo-randomly created and you can run:
 ```sh
 docker ps -a
 ```
