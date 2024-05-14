@@ -15,7 +15,7 @@
 #define PASSWORD "12345678"
 #define PORT "8765"
 
-#define LOOP_DELAY 5
+#define LOOP_DELAY 7
 
 
 #ifdef __arm__
@@ -39,8 +39,8 @@ int freeMemory() {
 Esp32Listener esp_listener;
 
 Action prev_action = Action{
-    angle:      0.0,
     velocity:   0.0,
+    angle:      0.0,
     rot_vel:    0.0,
 };
 Mode prev_mode = Mode::STANDBY;
@@ -59,10 +59,6 @@ void setup() {
 void loop() {
     uint32_t time = millis();
     auto [action, mode] = esp_listener.listen();
-    // Serial.println(action.angle);
-    // Serial.println(action.velocity);
-    // Serial.println(action.rot_vel);
-    // Serial.println((int)mode);
 
     switch (mode) {
         case Mode::STANDBY:
@@ -77,14 +73,12 @@ void loop() {
             rgb_write(GREEN);
             prev_action = action;
             prev_mode = mode;
-            delay(100);
             break;
 
         case Mode::CONTINUE:
             if (prev_mode == Mode::ACT) {
                 move(prev_action);
                 rgb_write(ORANGE);
-                delay(100);
             } else if (prev_mode == Mode::STANDBY) {
                 stop_motors();
                 rgb_write(BLUE);
@@ -95,11 +89,13 @@ void loop() {
             stop_motors();
             rgb_write(RED);
             prev_action = Action{
-                angle:      0.0,
                 velocity:   0.0,
+                angle:      0.0,
                 rot_vel:    0.0,
             };
             prev_mode = Mode::STANDBY;
+            delay(1000);
+            break;
 
     }
     while (millis() - time < LOOP_DELAY) {  }

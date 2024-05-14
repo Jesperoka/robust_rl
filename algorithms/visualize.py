@@ -102,21 +102,20 @@ def data_displayer(height, width, rollout_length, plot_queue, animation_queue):
                         current_metrics[actor][key][statistic].append(float(value)) # type: ignore[attr-defined]
 
             for i, actor in enumerate(current_metrics.keys()):
-                if actor == "actor_0":
-                    _mins[0] = min(_mins[0], min(current_metrics[actor]["policy_loss"]["min"]))
-                    _mins[1] = min(_mins[1], min(current_metrics[actor]["value_loss"]["min"]))
-                    _mins[2] = min(_mins[2], min(current_metrics[actor]["entropy"]["min"]))
-                    _mins[3] = min(_mins[3], min(current_metrics[actor]["return"]["min"]))
+                _mins[0] = min(_mins[0], min(current_metrics[actor]["policy_loss"]["min"]))
+                _mins[1] = min(_mins[1], min(current_metrics[actor]["value_loss"]["min"]))
+                _mins[2] = min(_mins[2], min(current_metrics[actor]["entropy"]["min"]))
+                _mins[3] = min(_mins[3], min(current_metrics[actor]["return"]["min"]))
 
-                    _maxs[0] = max(_maxs[0], max(current_metrics[actor]["policy_loss"]["max"]))
-                    _maxs[1] = max(_maxs[1], max(current_metrics[actor]["value_loss"]["max"]))
-                    _maxs[2] = max(_maxs[2], max(current_metrics[actor]["entropy"]["max"]))
-                    _maxs[3] = max(_maxs[3], max(current_metrics[actor]["return"]["max"]))
+                _maxs[0] = max(_maxs[0], max(current_metrics[actor]["policy_loss"]["max"]))
+                _maxs[1] = max(_maxs[1], max(current_metrics[actor]["value_loss"]["max"]))
+                _maxs[2] = max(_maxs[2], max(current_metrics[actor]["entropy"]["max"]))
+                _maxs[3] = max(_maxs[3], max(current_metrics[actor]["return"]["max"]))
 
-                    lines[i][0].set_data(range(len(current_metrics[actor]["policy_loss"]["mean"])), current_metrics[actor]["policy_loss"]["mean"])
-                    lines[i][1].set_data(range(len(current_metrics[actor]["value_loss"]["mean"])), current_metrics[actor]["value_loss"]["mean"])
-                    lines[i][2].set_data(range(len(current_metrics[actor]["entropy"]["mean"])), current_metrics[actor]["entropy"]["mean"])
-                    lines[i][3].set_data(range(len(current_metrics[actor]["return"]["mean"])), current_metrics[actor]["return"]["mean"])
+                lines[i][0].set_data(range(len(current_metrics[actor]["policy_loss"]["mean"])), current_metrics[actor]["policy_loss"]["mean"])
+                lines[i][1].set_data(range(len(current_metrics[actor]["value_loss"]["mean"])), current_metrics[actor]["value_loss"]["mean"])
+                lines[i][2].set_data(range(len(current_metrics[actor]["entropy"]["mean"])), current_metrics[actor]["entropy"]["mean"])
+                lines[i][3].set_data(range(len(current_metrics[actor]["return"]["mean"])), current_metrics[actor]["return"]["mean"])
 
                 for fill in fills[i]:
                     fill.remove()
@@ -254,11 +253,12 @@ def main():
     from environments.A_to_B_jax import A_to_B                  
     from environments.physical import ZeusLimits, PandaLimits
     from environments.options import EnvironmentOptions 
-    from environments.reward_functions import zero_reward, car_only_negative_distance
+    from environments.reward_functions import curriculum_reward
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import arm_fixed_pose, gripper_always_grip, car_fixed_pose
+    from inference.controllers import arm_fixed_pose, gripper_always_grip, arm_spline_tracking_controller, gripper_ctrl 
     from algorithms.utils import initialize_actors, FakeTrainState
     from jax import tree_map
+    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
     import jax.numpy as jnp
 
 
@@ -267,6 +267,7 @@ def main():
 
     current_dir = dirname(abspath(__file__))
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
+    CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -277,15 +278,13 @@ def main():
     num_envs = 1
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = car_only_negative_distance,
+        reward_fn      = partial(curriculum_reward, 20_000_000),
         # car_ctrl       = car_fixed_pose,
-        arm_ctrl       = arm_fixed_pose,
-        gripper_ctrl   = gripper_always_grip,
-        goal_radius    = 0.1,
+        # arm_ctrl       = ,
+        arm_low_level_ctrl = arm_spline_tracking_controller,
+        gripper_ctrl   = gripper_ctrl,
+        goal_radius    = 0.05,
         steps_per_ctrl = 20,
-        num_envs       = num_envs,
-        act_min        = jnp.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, jnp.array([-1.0])], axis=0),
-        act_max        = jnp.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, jnp.array([1.0])], axis=0)
     )
     env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
     rng = random.PRNGKey(reproducibility_globals.PRNG_SEED)
@@ -340,25 +339,30 @@ def main():
 
         return partial(training_loop, rollout_generator_queue, displayer_queue)
     
-    # WARNING: I CHANGED HOW actor_forward is passed to rollout
-
     # _rollout_fn = _rollout
     _rollout_fn = partial(rollout, env, model, data)
     _rollout_fn = partial(_rollout_fn, max_steps=250)
 
     lr = 3.0e-4
     max_grad_norm = 0.5
-    rnn_hidden_size = 32
-    rnn_fc_size = 256
-    
+    rnn_hidden_size = 16
+    rnn_fc_size = 64 
+
     act_sizes = tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
     actors, _ = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
-    actors.train_states = tuple(FakeTrainState(params=ts.params) for ts in actors.train_states)
+    actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
+
+    checkpointer = Checkpointer(PyTreeCheckpointHandler())
+    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
+
+    restored_actors.train_states = tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
+
+    _rollout_fn = partial(rollout, env, model, data, actor_forward_fns, rnn_hidden_size)
 
     with default_device(devices("cpu")[1]):
         print("Running rollout")
         # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, max_steps=250)
-        r_frames = _rollout_fn(Renderer(model, 500, 640), actors, max_steps=250)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, max_steps=250)
         print("Rollout finished with ", len(r_frames), " frames")
 
         from matplotlib.animation import FuncAnimation

@@ -13,8 +13,8 @@ from matplotlib import pyplot as plt
 
 from pprint import pprint
 
-# SCENE = "mujoco_models/scene_with_balls_rack.xml"
-SCENE = "mujoco_models/scene.xml"
+SCENE = "mujoco_models/scene_with_balls_rack.xml"
+# SCENE = "mujoco_models/scene.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
 jax.config.update("jax_compilation_cache_dir", COMPILATION_CACHE_DIR)
@@ -35,19 +35,18 @@ def step(mjx_model: mjx.Model, mjx_data: mjx.Data, v: jnp.ndarray, theta: jnp.nd
     return mjx_data
 
 
-# TODO: vmap and parallelize environment as done in the brax tutorial colab
 if __name__ == "__main__":
     model = mj.MjModel.from_xml_path(SCENE) # type: ignore[attr-defined]
     data = mj.MjData(model)                 # type: ignore[attr-defined]
     mj.mj_resetData(model, data)            # type: ignore[attr-defined]
     renderer = mujoco.Renderer(model)
 
-    body = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_goal"))
-    body_2 = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_reward_indicator"))
-    body.pos = np.array([1.0, 0.0, 0.115])
-    body_2.pos[2] = -0.0
-    pprint(body.pos)
-    pprint(body.ipos)
+    # body = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_goal"))
+    # body_2 = model.body(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, "car_reward_indicator"))
+    # body.pos = np.array([1.0, 0.0, 0.115])
+    # body_2.pos[2] = -0.0
+    # pprint(body.pos)
+    # pprint(body.ipos)
     # pprint(dir(body))
     viewer = mujoco.viewer.launch(model, data)
     exit()

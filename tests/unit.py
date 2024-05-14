@@ -8,7 +8,7 @@ from jax.lax import scan
 from jax.random import randint, choice, PRNGKey
 from ..algorithms.utils import batch_welford_update 
 from ..algorithms.mappo_jax import generalized_advantage_estimate 
-from ..environments.physical import ZeusLimits, PandaLimits
+from ..environments.physical import ZeusLimits, PandaLimits, ZeusDimensions
 from ..environments.A_to_B_jax import EnvironmentOptions, A_to_B
 from ..environments.reward_functions import zero_reward
 from reproducibility_globals import PRNG_SEED
@@ -195,12 +195,20 @@ MJX_MODEL: mjx.Model = mjx.put_model(MODEL)
 MJX_DATA: mjx.Data = mjx.put_data(MODEL, DATA)
 GRIP_SITE_ID: int = mj_name2id(MODEL, mjtObj.mjOBJ_SITE.value, "grip_site")
 OPTIONS: EnvironmentOptions = EnvironmentOptions(
-    reward_fn      = zero_reward,
-    goal_radius    = 0.1,
-    steps_per_ctrl = 20,
-    time_limit     = 4.0,
-    act_min        = jnp.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, jnp.array([-1.0])], axis=0),
-    act_max        = jnp.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, jnp.array([1.0])], axis=0)
+    reward_fn           = zero_reward,
+    goal_radius         = 0.1,
+    steps_per_ctrl      = 20,
+    time_limit          = 4.0,
+    timestep_noise      = 0.0,
+    impratio_noise      = 0.0,
+    tolerance_noise     = 0.0,
+    ls_tolerance_noise  = 0.0,
+    wind_noise          = 0.0,
+    density_noise       = 0.0,
+    viscosity_noise     = 0.0,
+    gravity_noise       = 0.0,
+    observation_noise   = 0.0,
+    ctrl_noise          = 0.0,
 )
 ENV = A_to_B(MJX_MODEL, MJX_DATA, GRIP_SITE_ID, OPTIONS)
 
@@ -233,24 +241,38 @@ def test_observation_decoding_functions():
         
     # Test decode_observation
     obs = jnp.array([
-        0.0, 0.0, 0.0,  # car pos
+        0.0, 0.0, 0.0,                      # car pos
         1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # arm pos
-        2.0, 2.0,  # gripper pos
-        3.0, 3.0, 3.0, # ball pos
-        4.0, 4.0, 4.0, # car vel
+        2.0, 2.0,                           # gripper pos
+        3.0, 3.0, 3.0,                      # ball pos
+        4.0, 4.0, 4.0,                      # car vel
         5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  # arm vel
-        6.0, 6.0,  # gripper vel
-        7.0, 7.0, 7.0,  # ball vel
-        8.0, 8.0,  # goal pos
-        9.0, # goal distance
+        6.0, 6.0,                           # gripper vel
+        7.0, 7.0, 7.0,                      # ball vel
+        8.0, 8.0,                           # goal pos
+        9.0,                                # car goal distance
+        10.0, 11.0, 12.0, 13.0,             # car corner distances
+        14.0, 15.0, 16.0, 17.0,             # goal corner distances
+        18.0, 19.0, 20.0, 21.0,             # ball corner distances
+        22.0,                               # ball car (target) distance
     ])
-    obs_size = 33
+    obs_size = 46
     assert obs.shape[0] == obs_size, f"Expected shape: {obs_size}, got: {obs.shape[0]}"
     assert obs.shape == OPTIONS.obs_min.shape, f"Expected shape: {OPTIONS.obs_min.shape}, got: {obs.shape}"
     assert obs.shape == OPTIONS.obs_max.shape, f"Expected shape: {OPTIONS.obs_max.shape}, got: {obs.shape}"
 
 
-    q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal = ENV.decode_observation(obs)
+    (
+        q_car, q_arm, q_gripper, p_ball, 
+        qd_car, qd_arm, qd_gripper, pd_ball, 
+        p_goal, 
+        dc_goal,
+        dcc_0, dcc_1, dcc_2, dcc_3,
+        dgc_0, dgc_1, dgc_2, dgc_3,
+        dbc_0, dbc_1, dbc_2, dbc_3,
+        db_target
+     ) = ENV.decode_observation(obs)
+
     assert jnp.all(q_car == jnp.array([0.0, 0.0, 0.0])), f"Expected: {jnp.array([0.0, 0.0, 0.0])}, got: {q_car}"
     assert jnp.all(q_arm == jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])), f"Expected: {jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])}, got: {q_arm}"
     assert jnp.all(q_gripper == jnp.array([2.0, 2.0])), f"Expected: {jnp.array([2.0, 2.0])}, got: {q_gripper}"
@@ -260,19 +282,32 @@ def test_observation_decoding_functions():
     assert jnp.all(qd_gripper == jnp.array([6.0, 6.0])), f"Expected: {jnp.array([6.0, 6.0])}, got: {qd_gripper}"
     assert jnp.all(pd_ball == jnp.array([7.0, 7.0, 7.0])), f"Expected: {jnp.array([7.0, 7.0, 7.0])}, got: {pd_ball}"
     assert jnp.all(p_goal == jnp.array([8.0, 8.0])), f"Expected: {jnp.array([8.0, 8.0])}, got: {p_goal}"
-    assert jnp.all(d_goal == jnp.array([9.0, 9.0])), f"Expected: {jnp.array([9.0, 9.0])}, got: {d_goal}"
+    assert jnp.all(dc_goal == jnp.array([9.0])), f"Expected: {jnp.array([9.0])}, got: {dc_goal}"
+    assert jnp.all(dcc_0 == jnp.array([10.0])), f"Expected: {jnp.array([10.0])}, got: {dcc_0}"
+    assert jnp.all(dcc_1 == jnp.array([11.0])), f"Expected: {jnp.array([11.0])}, got: {dcc_1}"
+    assert jnp.all(dcc_2 == jnp.array([12.0])), f"Expected: {jnp.array([12.0])}, got: {dcc_2}"
+    assert jnp.all(dcc_3 == jnp.array([13.0])), f"Expected: {jnp.array([13.0])}, got: {dcc_3}"
+    assert jnp.all(dgc_0 == jnp.array([14.0])), f"Expected: {jnp.array([14.0])}, got: {dgc_0}"
+    assert jnp.all(dgc_1 == jnp.array([15.0])), f"Expected: {jnp.array([15.0])}, got: {dgc_1}"
+    assert jnp.all(dgc_2 == jnp.array([16.0])), f"Expected: {jnp.array([16.0])}, got: {dgc_2}"
+    assert jnp.all(dgc_3 == jnp.array([17.0])), f"Expected: {jnp.array([17.0])}, got: {dgc_3}"
+    assert jnp.all(dbc_0 == jnp.array([18.0])), f"Expected: {jnp.array([18.0])}, got: {dbc_0}"
+    assert jnp.all(dbc_1 == jnp.array([19.0])), f"Expected: {jnp.array([19.0])}, got: {dbc_1}"
+    assert jnp.all(dbc_2 == jnp.array([20.0])), f"Expected: {jnp.array([20.0])}, got: {dbc_2}"
+    assert jnp.all(dbc_3 == jnp.array([21.0])), f"Expected: {jnp.array([21.0])}, got: {dbc_3}"
+    assert jnp.all(db_target == jnp.array([22.0])), f"Expected: {jnp.array([22.0])}, got: {db_target}"
 
 
 def test_env_observe():
     raw_obs_no_goal = jnp.array([
-        -1.0, -1.0, -1.0,  # car pos
+        -1.0, -1.0, -1.0,                   # car pos
         1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # arm pos
-        2.0, 2.0,  # gripper pos
-        3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, # ball pose
-        4.0, 4.0, 4.0,  # car vel
+        2.0, 2.0,                           # gripper pos
+        3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # ball pose
+        4.0, 4.0, 4.0,                      # car vel
         5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  # arm vel
-        6.0, 6.0,  # gripper vel
-        7.0, 7.0, 7.0, 7.0, 7.0, 7.0,  # ball qvel
+        6.0, 6.0,                           # gripper vel
+        7.0, 7.0, 7.0, 7.0, 7.0, 7.0,       # ball qvel
     ])
     raw_obs_no_goal_size = 37
     qpos_size = 19
@@ -285,13 +320,24 @@ def test_env_observe():
     mjx_data = MJX_DATA.replace(qpos=raw_obs_no_goal[0:qpos_size], qvel=raw_obs_no_goal[qpos_size:qpos_size+qvel_size])
     p_goal = jnp.array([8.0, 8.0])
 
-    obs = ENV.observe(mjx_data, p_goal)
-    obs_size = 33
+    rng = PRNGKey(0)
+    rng, obs = ENV.observe(rng, mjx_data, p_goal)
+    obs_size = 46
     assert obs.shape[0] == obs_size, f"Expected shape: {obs_size}, got: {obs.shape[0]}"
     assert obs.shape == OPTIONS.obs_min.shape, f"Expected shape: {OPTIONS.obs_min.shape}, got: {obs.shape}"
     assert obs.shape == OPTIONS.obs_max.shape, f"Expected shape: {OPTIONS.obs_max.shape}, got: {obs.shape}"
 
-    q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal = ENV.decode_observation(obs)
+    (
+        q_car, q_arm, q_gripper, p_ball, 
+        qd_car, qd_arm, qd_gripper, pd_ball, 
+        p_goal, 
+        dc_goal,
+        dcc_0, dcc_1, dcc_2, dcc_3,
+        dgc_0, dgc_1, dgc_2, dgc_3,
+        dbc_0, dbc_1, dbc_2, dbc_3,
+        db_target
+     ) = ENV.decode_observation(obs)
+
     assert jnp.all(q_car == jnp.array([-1.0, -1.0, jnp.mod(-1.0, 2*jnp.pi)])), f"Expected: {jnp.array([-1.0, -1.0, jnp.mod(-1.0, 2*jnp.pi)])}, got: {q_car}"
     assert jnp.all(q_arm == jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])), f"Expected: {jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])}, got: {q_arm}"
     assert jnp.all(q_gripper == jnp.array([2.0, 2.0])), f"Expected: {jnp.array([2.0, 2.0])}, got: {q_gripper}"
@@ -301,7 +347,23 @@ def test_env_observe():
     assert jnp.all(qd_gripper == jnp.array([6.0, 6.0])), f"Expected: {jnp.array([6.0, 6.0])}, got: {qd_gripper}"
     assert jnp.all(pd_ball == jnp.array([7.0, 7.0, 7.0])), f"Expected: {jnp.array([7.0, 7.0, 7.0])}, got: {pd_ball}"
     assert jnp.all(p_goal == jnp.array([8.0, 8.0])), f"Expected: {jnp.array([8.0, 8.0])}, got: {p_goal}"
-    assert jnp.all(d_goal == jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])), f"Expected: {jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])}, got: {d_goal}"
+    assert jnp.all(dc_goal == jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])), f"Expected: {jnp.array([jnp.sqrt(9.0**2 + 9.0**2)])}, got: {dc_goal}"
+    assert jnp.allclose(dcc_0, jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_min)**2 + (-1 - ENV.car_limits.y_min)**2)])), f"Expected: {jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_min)**2 + (-1 - ENV.car_limits.y_min)**2)])}, got: {dcc_0}"
+    assert jnp.allclose(dcc_1, jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_min)**2 + (-1 - ENV.car_limits.y_max)**2)])), f"Expected: {jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_min)**2 + (-1 - ENV.car_limits.y_max)**2)])}, got: {dcc_1}"
+    assert jnp.allclose(dcc_2, jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_max)**2 + (-1 - ENV.car_limits.y_min)**2)])), f"Expected: {jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_max)**2 + (-1 - ENV.car_limits.y_min)**2)])}, got: {dcc_2}"
+    assert jnp.allclose(dcc_3, jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_max)**2 + (-1 - ENV.car_limits.y_max)**2)])), f"Expected: {jnp.array([jnp.sqrt((-1 - ENV.car_limits.x_max)**2 + (-1 - ENV.car_limits.y_max)**2)])}, got: {dcc_3}"
+    assert jnp.allclose(dgc_0, jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_min)**2 + (8.0 - ENV.car_limits.y_min)**2)])), f"Expected: {jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_min)**2 + (8.0 - ENV.car_limits.y_min)**2)])}, got: {dgc_0}"
+    assert jnp.allclose(dgc_1, jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_min)**2 + (8.0 - ENV.car_limits.y_max)**2)])), f"Expected: {jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_min)**2 + (8.0 - ENV.car_limits.y_max)**2)])}, got: {dgc_1}"
+    assert jnp.allclose(dgc_2, jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_max)**2 + (8.0 - ENV.car_limits.y_min)**2)])), f"Expected: {jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_max)**2 + (8.0 - ENV.car_limits.y_min)**2)])}, got: {dgc_2}"
+    assert jnp.allclose(dgc_3, jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_max)**2 + (8.0 - ENV.car_limits.y_max)**2)])), f"Expected: {jnp.array([jnp.sqrt((8.0 - ENV.car_limits.x_max)**2 + (8.0 - ENV.car_limits.y_max)**2)])}, got: {dgc_3}"
+    assert jnp.allclose(dbc_0, jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_min)**2 + (3.0 - ENV.car_limits.y_min)**2 + (3.0 - ENV.playing_area.floor_height)**2)])), f"Expected: {jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_min)**2 + (3.0 - ENV.car_limits.y_min)**2 + (3.0 - ENV.playing_area.floor_height)**2)])}, got: {dbc_0}"
+    assert jnp.allclose(dbc_1, jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_min)**2 + (3.0 - ENV.car_limits.y_max)**2 + (3.0 - ENV.playing_area.floor_height)**2)])), f"Expected: {jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_min)**2 + (3.0 - ENV.car_limits.y_max)**2 + (3.0 - ENV.playing_area.floor_height)**2)])}, got: {dbc_1}"
+    assert jnp.allclose(dbc_2, jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_max)**2 + (3.0 - ENV.car_limits.y_min)**2 + (3.0 - ENV.playing_area.floor_height)**2)])), f"Expected: {jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_max)**2 + (3.0 - ENV.car_limits.y_min)**2 + (3.0 - ENV.playing_area.floor_height)**2)])}, got: {dbc_2}"
+    assert jnp.allclose(dbc_3, jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_max)**2 + (3.0 - ENV.car_limits.y_max)**2 + (3.0 - ENV.playing_area.floor_height)**2)])), f"Expected: {jnp.array([jnp.sqrt((3.0 - ENV.car_limits.x_max)**2 + (3.0 - ENV.car_limits.y_max)**2 + (3.0 - ENV.playing_area.floor_height)**2)])}, got: {dbc_3}"
+    assert jnp.allclose(db_target, jnp.array([jnp.sqrt((3.0 - -1.0)**2 + (3.0 - -1.0)**2 + (3.0 - (ENV.playing_area.floor_height + ZeusDimensions.target_height))**2)])), f"Expected: {jnp.array([jnp.sqrt((3.0 - -1.0)**2 + (3.0 - -1.0)**2 + (3.0 - (ENV.playing_area.floor_height + ZeusDimensions.target_height))**2)])}, got: {db_target}"
+
+
+
 
 
 # END OF TESTS FOR: Environment subroutines
@@ -496,7 +558,7 @@ def test_compare_gae_implementation_stable_baselines_and_jaxmarl(gamma, gae_lamb
     final_value_np = np.array(final_value)
     final_done_np = np.array(final_done)
 
-    traj_next_terminal = jnp.roll(traj_terminal, shift=-1, axis=0)
+    traj_next_terminal = jnp.roll(traj_terminal, shift=-1, axis=0) # stable_baselines dones are shifted by 1 compared to JaxMarl
     traj_next_terminal = traj_next_terminal.at[-1].set(final_done)
 
     # filtering the final value does not make a difference if correct next_terminal states are provided
@@ -589,5 +651,5 @@ def test_compare_gae_implementation_stable_baselines_and_jaxmarl(gamma, gae_lamb
     assert jnp.allclose(sb_advantages, jaxmarl_advantages, rtol=GAE_ATOL), f"StableBaselines vs. JaxMarl (advantage) Expected: \n\n{sb_advantages}, \n\ngot: \n\n{jaxmarl_advantages} \n\nin test case \n\n{gamma}, \n\n{gae_lambda}, \n\n{traj_terminal}, \n\n{traj_value}, \n\n{traj_reward}, \n\n{final_value}"
     assert jnp.allclose(sb_targets, jaxmarl_targets, rtol=GAE_ATOL), f"StableBaselines vs. JaxMarl (return) Expected: \n\n{sb_targets}, \n\ngot: \n\n{jaxmarl_targets} \n\nin test case \n\n{gamma}, \n\n{gae_lambda}, \n\n{traj_terminal}, \n\n{traj_value}, \n\n{traj_reward}, \n\n{final_value}"
 
-    # Can be uncommented to check the values
+    # Uncommented to check the values
     # assert False, f"\n\nMe: \n\n{my_advantages}, \n\n{my_targets} \n\nJaxMarl: \n\n{jaxmarl_advantages}, \n\n{jaxmarl_targets} \n\nStableBaselines: \n\n{sb_advantages}, \n\n{sb_targets}"

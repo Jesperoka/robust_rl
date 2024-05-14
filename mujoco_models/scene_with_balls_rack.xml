@@ -70,6 +70,8 @@
             scale="0.0645 0.0645 0.0645" />
         <material name="glass" rgba="0.7 0.7 0.9 0.2" reflectance="0.5" specular="0.4"/>
     </asset>
+    
+    <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
 
     <include file="panda_extras.xml" />
 
@@ -82,7 +84,6 @@
                 friction="0.001" />
         </body>
 
-        <include file="zeus_car.xml" /> <!-- NOTE: ZEUS DEFINED FIRST -->
         <body name="driving_surface" pos="1.1 0 0.0">
             <body name="driving_surface_top" pos="0 0 0.1">
                 <geom pos="0 0 0" size="1 1 0.01" type="box" material="black_plastic" />

@@ -14,10 +14,11 @@ from jax.random import PRNGKey, split
 from mujoco import MjModel, mj_name2id, mjtObj
 from mujoco.mjx import Model, put_model
 from os.path import join, dirname, abspath
-from time import monotonic_ns 
+from time import clock_gettime_ns, CLOCK_REALTIME, CLOCK_MONOTONIC
 from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
 from algorithms.utils import initialize_actors, ActorInput
 from inference.controllers import arm_fixed_pose, gripper_always_grip 
+from inference.processing import LowPassFilter
 from environments.reward_functions import car_only_negative_distance 
 from environments.options import EnvironmentOptions
 from environments.physical import PlayingArea, PandaLimits, ZeusLimits
@@ -29,7 +30,7 @@ from pprint import pprint
 
 CURRENT_DIR = dirname(abspath(__file__))
 CHECKPOINT_DIR = join(CURRENT_DIR, "..", "trained_policies", "checkpoints")
-CHECKPOINT_FILE = "zeus_rnn_32"
+CHECKPOINT_FILE = "checkpoint_LATEST"
 MODEL_DIR = "mujoco_models"
 MODEL_FILE = "scene.xml"
 
@@ -60,10 +61,6 @@ def setup_env():
         goal_radius    = 0.1,
         steps_per_ctrl = 20,
         time_limit     = 3.0,
-        num_envs       = 1,
-        prng_seed      = reproducibility_globals.PRNG_SEED,
-        act_min        = np.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, np.array([-1.0])], axis=0),
-        act_max        = np.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, np.array([1.0])], axis=0)
     )
 
     env = A_to_B(mjx_model, None, grip_site_id, options)
@@ -148,16 +145,20 @@ def observe_car(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt):
     car_R_ground_frame = ground_R.T @ car_R
     # theta = np.arccos(0.5 * (np.trace(car_R_ground_frame) - 1.0))
 
-    OFFSET = -np.pi/2.0
+    OFFSET = np.pi #0.0 # CHANGE THIS TO FIT WITH THE ORIENATION OF THE CAR APRIL-TAG
+    MAX_ABS_VEL = np.array([1.0, 1.0, 1.0])
 
     x_dir = np.array((1.0, 0.0))
     x_dir_rotated = car_R_ground_frame[0:2, 0:2] @ x_dir # approximate rotation about z-axis
-    theta = np.arctan2(x_dir_rotated[1]*x_dir[0] - x_dir_rotated[0]*x_dir[1], x_dir_rotated[0]*x_dir[0] + x_dir_rotated[1]*x_dir[1])
-    theta = np.mod(theta + OFFSET, 2*np.pi)
+    _theta = -np.arctan2(x_dir_rotated[1]*x_dir[0] - x_dir_rotated[0]*x_dir[1], x_dir_rotated[0]*x_dir[0] + x_dir_rotated[1]*x_dir[1])
+    theta = np.mod(_theta + OFFSET, 2*np.pi)
     # theta = np.arccos(np.dot(x_dir, x_dir_rotated) / (np.linalg.norm(x_dir, ord=2)*np.linalg.norm(x_dir_rotated, ord=2)))
 
-    q_car = np.array((-car_t_ground_frame[0][0], car_t_ground_frame[1][0], theta)) # car_x == cam_z, car_y == -cam_x
-    qd_car = (finite_difference(q_car, prev_q_car, dt) + prev_qd_car ) / 2.0 # Average of previous computed velocity and positional finite differences
+    q_car = np.array((car_t_ground_frame[0][0], -car_t_ground_frame[1][0], theta)) # car_x == cam_z, car_y == -cam_x
+
+    qd_car = (finite_difference(q_car, prev_q_car, dt) + prev_qd_car) / 2.0 # Average of previous computed velocity and positional finite differences
+    qd_car[2] = qd_car[2] if abs(qd_car[2]) <= 5.0 else -np.sign(qd_car[2])*min(abs(finite_difference(qd_car[2]-2*np.pi, prev_qd_car[2], dt)), abs(finite_difference(qd_car[2]+2*np.pi, prev_qd_car[2], dt)))
+    qd_car = np.clip(np.round(qd_car, 2), -MAX_ABS_VEL, MAX_ABS_VEL)
 
     return q_car, qd_car, (car_R_ground_frame, car_t_ground_frame)
 
@@ -184,7 +185,7 @@ def observe(
     p_ball = np.array([0.1, 0.0, 1.3])
     pd_ball = np.zeros(3)
 
-    p_goal = np.array([-0.288717, -0.524066])
+    p_goal = np.array([1.4428220, -0.6173251])
     dc_goal = np.array([np.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
      
     obs = np.concatenate((
@@ -205,32 +206,40 @@ async def websocket_client(queue, uri="ws://192.168.4.1:8765"): # ESP32-CAM IP a
             print("\nConnected to Zeus Car.\n")
             while True:
                 if not queue.empty():
-                    message = queue.get_nowait()
+                    message = await queue.get()
 
-                    if message is None:
-                        await websocket.send(dumps(done) + ">")
+                    if message is not None:
+                        for _ in range(2):
+                            await websocket.send(dumps(message))
+
+                    elif message is None:
+                        print("Closing connection to Zeus.")
+                        for _ in range(10):
+                            await websocket.send(dumps(done))
+                        await websocket.close()
                         return None
 
-                    await websocket.send(dumps(message) + ">") 
-
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0.001)
 
         except websockets.ConnectionClosed:
+            if not queue.empty() and queue.get_nowait() is None:
+                print("Closing connection to Zeus.")
+                for _ in range(10):
+                    await websocket.send(dumps(done))
+                await websocket.close()
+                return None
             print("\nConnection with Zeus Car lost.\n")
 
-
+EPSILON = 0.005
 
 def main():
     env = setup_env()
 
     ctrl_time = 0.04
-    ctrl_time_ns = int(ctrl_time * 1e9)
+    ctrl_time_ns = int(ctrl_time * 1.0e9)
 
-    ground_R = np.array([[-0.0584163 ,  0.99816874,  0.01570677], 
-                         [-0.27988767, -0.03147855,  0.95951654], 
-                         [ 0.95825384,  0.05165528,  0.28121398]])
-
-    ground_t = np.array([[0.17442545], [0.58795911], [1.22108916]])
+    ground_R = np.eye(3)
+    ground_t = np.zeros((3, 1))
 
     prev_q_car = np.zeros(3)
     prev_qd_car = np.zeros(3)
@@ -240,7 +249,7 @@ def main():
     act_sizes = (space.sample().shape[0] for space in env.act_spaces)
     num_envs = 1
     num_agents = 2
-    rnn_hidden_size = 32 
+    rnn_hidden_size = 16 
     rnn_fc_size = 64 
     lr = 1e-3
     max_grad_norm = 0.5
@@ -249,9 +258,9 @@ def main():
 
     detector: Detector = Detector(
         families="tag36h11",
-        nthreads=1,
-        quad_decimate=0.0,
-        quad_sigma=1.0,
+        nthreads=4,
+        quad_decimate=1.5,
+        quad_sigma=0.0,
         refine_edges=1,
         decode_sharpening=0.25,
     )
@@ -262,14 +271,38 @@ def main():
     car_command_queue = asyncio.Queue()
     print("Running Zeus websocket client ...")
 
+    
+    lowpass_obs = LowPassFilter(input_shape=(obs_size, ), history_length=10, bandlimit_hz=0.75, sample_rate_hz=1.0/(ctrl_time + EPSILON))
+
+    dt = ctrl_time
+
     async def loop_body():
-        nonlocal pipe, car_R, car_t, prev_q_car, prev_qd_car, actor_hidden_states, frame
+        nonlocal pipe, car_R, car_t, ground_R, ground_t, prev_q_car, prev_qd_car, actor_hidden_states, frame, dt 
 
         print("Running april-tag detection...\nPress 'q' to exit")
         done = False
         while not done:
-            observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, ctrl_time) 
-            (q_car, _, _, _, qd_car, *_) = env.decode_observation(observation)
+            start_ns = clock_gettime_ns(CLOCK_MONOTONIC)
+            observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt) 
+            observation = lowpass_obs(observation)
+
+            (
+                q_car, q_arm, q_gripper, p_ball, 
+                qd_car, qd_arm, qd_gripper, pd_ball, 
+                p_goal, 
+                dc_goal,
+                dcc_0, dcc_1, dcc_2, dcc_3,
+                dgc_0, dgc_1, dgc_2, dgc_3,
+                dbc_0, dbc_1, dbc_2, dbc_3,
+                db_target
+             ) = env.decode_observation(observation)
+
+            if dc_goal <= 0.1:
+                print("Goal Reached...")
+                car_command_queue.put_nowait(None)
+                done = True 
+                return None
+
             prev_q_car = q_car
             prev_qd_car = qd_car
 
@@ -279,27 +312,52 @@ def main():
 
             car_orientation = q_car[2]
 
-            print(f"Car x: {q_car[0]}, Car y: {q_car[1]}, Car theta: {q_car[2]}")
+            print(f"Car x: {q_car[0]}, Car y: {q_car[1]}, Car theta: {q_car[2]}, Car vx: {qd_car[0]}, Car vy: {qd_car[1]}, Car omega: {qd_car[2]}, dt: {dt}, time-error: {dt - ctrl_time}")
 
-            ctrl = jit(env.compute_controls)(car_orientation, observation, action)
+            # ctrl = jit(env.compute_controls)(car_orientation, observation, action)
+            action = env.scale_action(action[0:3], env.act_space_car.low, env.act_space_car.high)
+
+            # TODO: add modifier based on omega as well
+            def car_velocity_modifier(theta):
+                return 0.5 + 0.5*( np.abs( ( np.mod(theta, (np.pi/2.0)) ) - (np.pi/4.0) ) / (np.pi/4.0) )
+
+            def rotation_velocity_modifier(velocity, omega):
+                return np.clip(velocity - np.abs(omega), 0.0, velocity)
+
+            # action[0] = car_velocity_modifier(action[1])*action[0]
+            action[0] = rotation_velocity_modifier(action[0], action[2])
+
+            # NOTE: do I need to scale the velocity/magnitude based on angle? or is it better to just let the hardware do whatever it can?
+            # action = env.
             
-            car_command = {"A": float(ctrl[0]), "B": float(ctrl[1]), "C": float(ctrl[2]), "D": ACT}
+            car_command = {"A": round(float(action[0]), 4), "B": round(float(action[1]), 4), "C": round(float(action[2]), 4), "D": ACT}
+            print(car_command)
+            # car_command = {"A": round(float(action[0]), 3), "B": round(float(action[1]), 3), "C": round(float(0.0), 3), "D": ACT}
+            # car_command = {"A": round(0.0, 2), "B": round(float(np.mod(0.0, 2*np.pi)), 2), "C": round(1.000000011234124, 2), "D": ACT}
             car_command_queue.put_nowait(car_command)
 
-            start_ns = monotonic_ns()
-            while monotonic_ns() - start_ns < ctrl_time_ns:
+            while clock_gettime_ns(CLOCK_MONOTONIC) - start_ns <= ctrl_time_ns - EPSILON:
+                await asyncio.sleep(EPSILON/2.0)
 
                 _frame = pipe.wait_for_frames().get_infrared_frame()
                 frame = _frame if _frame else frame
 
                 image = np.asarray(frame.data, dtype=np.uint8)
-                detections: list[Detection] = detector.detect(image, estimate_tag_pose=True, camera_params=cam_params, tag_size=0.14) # type: ignore[assignment]
+                detections: list[Detection] = detector.detect(image, estimate_tag_pose=True, camera_params=cam_params, tag_size=0.1858975) # type: ignore[assignment]
 
-                if len(detections) > 0:
-                    car_R = detections[0].pose_R
-                    car_t = detections[0].pose_t
+                car_detection = list(filter(lambda d: d.tag_id == 0, detections))
+                floor_detection = list(filter(lambda d: d.tag_id == 1, detections))
+
+                if car_detection:
+                    car_R = car_detection[0].pose_R
+                    car_t = car_detection[0].pose_t
+
+                if floor_detection:
+                    ground_R = floor_detection[0].pose_R
+                    ground_t = floor_detection[0].pose_t
 
                 frame = draw_axes(image, car_R, car_t, K)
+                frame = draw_axes(image, ground_R, ground_t, K)
                 # print("\n\n::::: ", car_R, car_t, " :::::\n\n")
 
                 cv2.imshow("image", image)
@@ -308,7 +366,8 @@ def main():
                     car_command_queue.put_nowait(None)
                     done = True 
 
-                await asyncio.sleep(0.0005)
+            dt = (clock_gettime_ns(CLOCK_MONOTONIC) - start_ns) * 1e-9
+
 
         return None
 

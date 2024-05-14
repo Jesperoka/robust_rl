@@ -1,9 +1,10 @@
+from jax._src.random import KeyArray
 import reproducibility_globals
 import jax
 import chex
 
 from functools import partial 
-from typing import Any, Callable 
+from typing import Any, Callable, NamedTuple 
 from math import pi
 
 from jax import Array, numpy as jnp
@@ -13,10 +14,19 @@ from environments.options import EnvironmentOptions
 from environments.physical import HandLimits, PlayingArea, ZeusLimits, PandaLimits, ZeusDimensions
 
 
-# import pdb
+import pdb
 
 
 DEFAULT_RNG: PRNGKey = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
+
+
+class EnvironmentState(NamedTuple):
+    rng:            KeyArray
+    mjx_model:      Model 
+    mjx_data:       Data
+    p_goal:         Array
+    b_prev:         tuple[Array, Array, Array] # previous last 3 B-spline control points
+    ball_released:  Array
 
 
 @chex.dataclass
@@ -49,25 +59,48 @@ class A_to_B:
 
     def __init__(self, mjx_model: Model, mjx_data: Data, grip_site_id: int, options: EnvironmentOptions) -> None:
         self.mjx_model: Model = mjx_model
-        # self.mjx_data: Data = mjx_data 
+        self.mjx_data: Data = mjx_data 
         self.grip_site_id: int = grip_site_id
 
-        self.reward_fn:       Callable[[Array, Array], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
+        self.reward_fn:       Callable[[Array, Array, int], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
         self.car_ctrl:        Callable[[Array, Array], Array] = partial(options.car_ctrl, self.decode_observation)
         self.arm_ctrl:        Callable[[Array, Array], Array] = partial(options.arm_ctrl, self.decode_observation)
         self.gripper_ctrl:    Callable[[Array], Array] = options.gripper_ctrl 
         self.goal_radius:     float = options.goal_radius 
-        # self.num_envs:        int = options.num_envs # TODO: remove num_envs as argument and from options
         self.steps_per_ctrl:  int = options.steps_per_ctrl
         self.time_limit:      Array = jnp.array(options.time_limit)
         self.agent_ids:       tuple[str, str] = options.agent_ids
-        self.prng_key:        PRNGKey = jax.random.PRNGKey(options.prng_seed)
-        self.null_reward:     tuple[Array, Array] = options.null_reward
-        self.obs_space:       Space = Space(low=options.obs_min, high=options.obs_max)
-        self.act_space:       Space = Space(low=options.act_min, high=options.act_max)
-        self.act_space_car:   Space = Space(low=options.act_min[:3], high=options.act_max[:3]) # WARNING: hardcoded for now
-        self.act_space_arm:   Space = Space(low=options.act_min[3:], high=options.act_max[3:]) # WARNING: hardcoded for now
-        self.act_spaces:      tuple[Space, Space] = (self.act_space_car, self.act_space_arm)
+
+        # Spaces
+        self.obs_space: Space = Space(low=options.obs_min, high=options.obs_max)
+        self.act_space: Space = Space(
+                low=jnp.concatenate([options.car_act_min, options.arm_act_min, options.gripper_act_min], axis=0), 
+                high=jnp.concatenate([options.car_act_max, options.arm_act_max, options.gripper_act_max], axis=0)
+        )
+        self.act_space_car: Space = Space(low=options.car_act_min, high=options.car_act_max) 
+        self.act_space_arm: Space = Space(
+                low=jnp.concatenate([options.arm_act_min, options.gripper_act_min], axis=0), 
+                high=jnp.concatenate([options.arm_act_max, options.gripper_act_max], axis=0)
+        ) 
+        self.act_spaces:    tuple[Space, Space] = (self.act_space_car, self.act_space_arm)
+
+        # Arm low level tracking controller
+        self.vel_margin: float = options.velocity_margin # how close the low level arm controller can go to the joint velocity limits before zeroing torque commands
+        self.arm_low_level_ctrl: Callable[[Array, Array, Array, Array, Array, Array, Array, Array], Array] = partial(options.arm_low_level_ctrl, float(self.mjx_model.opt.timestep), self.vel_margin)
+
+        # Domain randomization. Noises are uniform in [-noise, noise]. (+) additive, [*] multiplicative
+        self.timestep_noise:        float = options.timestep_noise      # s         (+)     timestep = timestep + noise
+        self.impratio_noise:        float = options.impratio_noise      #           (+)     impratio = impratio + noise
+        self.tolerance_noise:       float = options.tolerance_noise     #           (+)     tolerance = tolerance + noise
+        self.ls_tolerance_noise:    float = options.ls_tolerance_noise  #           (+)     ls_tolerance = ls_tolerance + noise
+        self.wind_noise:            float = options.wind_noise          # m/s       (+)     wind = wind + noise
+        self.density_noise:         float = options.density_noise       # kg/m^3    (+)     density = density + noise
+        self.viscosity_noise:       float = options.viscosity_noise     # kg/m/s    (+)     visc = visc + noise
+        self.gravity_noise:         float = options.gravity_noise       # m/s^2     (+)     gravity = gravity + noise
+        self.actuator_gain_noise:   float = options.actuator_gain_noise #           (+)     actuator_gainprm = actuator_gainprm + noise
+        self.actuator_bias_noise:   float = options.actuator_bias_noise #           (+)     actuator_biasprm = actuator_biasprm + noise
+        self.observation_noise:     float = options.observation_noise   # fraction  [*]     obs = (1 + noise)*obs
+        self.ctrl_noise:            float = options.ctrl_noise          # fraction  [*]     act = (1 + noise)*act
 
         self.car_limits: ZeusLimits = ZeusLimits()
         self.arm_limits: PandaLimits = PandaLimits()
@@ -89,46 +122,20 @@ class A_to_B:
         assert self.car_limits.y_max <= self.playing_area.y_center + self.playing_area.half_y_length, f"self.car_limits.y_max = {self.car_limits.y_max} should be less than or equal to self.playing_area.y_center + self.playing_area.half_y_length = {self.playing_area.y_center + self.playing_area.half_y_length}."
         assert self.car_limits.y_min >= self.playing_area.y_center - self.playing_area.half_y_length, f"self.car_limits.y_min = {self.car_limits.y_min} should be greater than or equal to self.playing_area.y_center - self.playing_area.half_y_length = {self.playing_area.y_center - self.playing_area.half_y_length}."
 
-
-    # TODO: output of reset() and input-output of step(): 
-    #           it would be 'cleaner' to use p_goal from mjx_data now that it exists as a body 
-    #           in the model for visualization anyway, not a priority though.
-
-    # NOTE: (IDEA) domain randomization on simulator options
-    ## 
-    # model.opt: mjx.Option has (among other):
-    ##
-    # timestep: jax.Array
-    # # unsupported: apirate
-    # impratio: jax.Array
-    # tolerance: jax.Array
-    # ls_tolerance: jax.Array
-    # # unsupported: noslip_tolerance, mpr_tolerance
-    # gravity: jax.Array
-    # wind: jax.Array
-    # density: jax.Array
-    # viscosity: jax.Array
-    # has_fluid_params: bool
-    # # unsupported: magnetic, o_margin, o_solref, o_solimp
-    # integrator: IntegratorType
-    # cone: ConeType
-    ## 
-    
     # --------------------------------------- begin reset --------------------------------------- 
     # -------------------------------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0,))
-    def reset(self, rng: Array, mjx_data: Data) -> tuple[tuple[Data, Array], Array]:
+    def reset(self, state: EnvironmentState) -> tuple[EnvironmentState, Array]:
+        rng, mjx_model, mjx_data, _, _, _ = state
+
         rng, qpos, qvel = self.reset_car_arm_and_gripper(rng)                                                       
         mjx_data = mjx_forward(
-                self.mjx_model, 
+                mjx_model, 
                 mjx_data.replace(
                     qpos=qpos, 
                     qvel=qvel, 
-                    # qacc=jnp.zeros_like(qvel), 
                     time=jnp.array(0.0), 
                     ctrl=jnp.zeros(self.mjx_model.nu), 
-                    # act=jnp.zeros(self.mjx_model.na),
-                    # act_dot=jnp.zeros(self.mjx_model.na)
         ))
 
         grip_site = mjx_data.site_xpos[self.grip_site_id]
@@ -136,13 +143,16 @@ class A_to_B:
         qpos = jnp.concatenate((qpos[0 : -self.nq_ball], q_ball), axis=0)                                   
         qvel = jnp.concatenate((qvel[0 : -self.nv_ball], qd_ball), axis=0)                                  
     
-        mjx_data = mjx_forward(self.mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
-        observation = self.observe(mjx_data, p_goal)
-        # observation, _, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), jnp.zeros_like(self.act_space.low))
+        mjx_data = mjx_forward(mjx_model, mjx_data.replace(qpos=qpos, qvel=qvel))
 
-        return (mjx_data, p_goal), observation 
+        rng, observation = self.observe(rng, mjx_data, p_goal)
 
-    def reset_car_arm_and_gripper(self, rng: Array) -> tuple[Array, Array, Array]:
+        b_prev = (self.arm_limits.q_start, self.arm_limits.q_start, self.arm_limits.q_start)
+        ball_released = jnp.array(False)
+
+        return EnvironmentState(rng, mjx_model, mjx_data, p_goal, b_prev, ball_released), observation 
+
+    def reset_car_arm_and_gripper(self, rng: KeyArray) -> tuple[KeyArray, Array, Array]:
         rng, rng_car, rng_arm, rng_gripper = jax.random.split(rng, 4)                                   
         q_car, qd_car = self.reset_car(rng_car)                                                  
         q_arm, qd_arm = self.reset_arm(rng_arm)                                                  
@@ -154,37 +164,75 @@ class A_to_B:
                 jnp.concatenate((q_car, q_arm, q_gripper, q_ball_placeholder), axis=0), 
                 jnp.concatenate((qd_car, qd_arm, qd_gripper, qd_ball_placeholder), axis=0))                                                                                                   
 
-    def reset_ball_and_goal(self, rng: Array, grip_site: Array) -> tuple[Array, Array, Array, Array]:
+    def reset_ball_and_goal(self, rng: KeyArray, grip_site: Array) -> tuple[KeyArray, Array, Array, Array]:
         rng, rng_ball, rng_goal = jax.random.split(rng, 3)                                              
         q_ball, qd_ball = self.reset_ball(rng_ball, grip_site)
         p_goal = self.reset_goal(rng_goal)
 
-        return rng, q_ball, qd_ball, p_goal                                                                         
+        return rng, q_ball, qd_ball, p_goal                                                      
+
+    def randomize_domain(self, rng: KeyArray) -> Model:
+        _rngs = jax.random.split(rng, 10)
+
+        return self.mjx_model.tree_replace({ # type: ignore[assignment]
+                "opt": self.mjx_model.opt.replace( # type: ignore[assignment]
+                    timestep = self.mjx_model.opt.timestep + jax.random.uniform(_rngs[0], minval= -self.timestep_noise, maxval=self.timestep_noise), 
+                    impratio = self.mjx_model.opt.impratio + jax.random.uniform(_rngs[1], minval= -self.impratio_noise, maxval=self.impratio_noise), 
+                    tolerance = self.mjx_model.opt.tolerance + jax.random.uniform(_rngs[2], minval= -self.tolerance_noise, maxval=self.tolerance_noise), 
+                    ls_tolerance = self.mjx_model.opt.ls_tolerance + jax.random.uniform(_rngs[3], minval= -self.ls_tolerance_noise, maxval=self.ls_tolerance_noise), 
+                    gravity = self.mjx_model.opt.gravity + jnp.array([0.0, 0.0, jax.random.uniform(_rngs[4], minval= -self.gravity_noise, maxval=self.gravity_noise)]), 
+                    wind = self.mjx_model.opt.wind + jax.random.uniform(_rngs[5], shape=self.mjx_model.opt.wind.shape, minval=-self.wind_noise, maxval=self.wind_noise), 
+                    viscosity = self.mjx_model.opt.viscosity + jax.random.uniform(_rngs[6], minval=0, maxval=self.viscosity_noise), 
+                    density = self.mjx_model.opt.density + jax.random.uniform(_rngs[7], minval=0, maxval=self.density_noise)
+                    ),
+                    "actuator_gainprm": self.mjx_model.actuator_gainprm.at[:, 0].set(self.mjx_model.actuator_gainprm[:, 0] + jax.random.uniform(_rngs[8], minval= -self.actuator_gain_noise, maxval=self.actuator_gain_noise)),
+                    "actuator_biasprm": self.mjx_model.actuator_biasprm.at[:, 1].set(self.mjx_model.actuator_biasprm[:, 1] + jax.random.uniform(_rngs[9], minval= -self.actuator_bias_noise, maxval=self.actuator_bias_noise))
+                })
+
     # ---------------------------------------- end reset ---------------------------------------- 
     # -------------------------------------------------------------------------------------------
 
 
     # --------------------------------------- begin step ---------------------------------------- 
     # -------------------------------------------------------------------------------------------
+    # BUG: TODO -> revert back to no RNG passed to observe()
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, mjx_data: Data, p_goal: Array, action: Array) -> tuple[tuple[Data, Array], Array, tuple[Array, Array], Array, Array]:
+    def step(self, state: EnvironmentState, action: Array, training_step: int) -> tuple[EnvironmentState, Array, tuple[Array, Array], Array, Array]:
+        rng, mjx_model, mjx_data, p_goal, b_prev, ball_released = state
+
         car_orientation = self.get_car_orientation(mjx_data)
-        observation = self.observe(mjx_data, p_goal)
-        ctrl = self.compute_controls(car_orientation, observation, action)
-        mjx_data = self.n_step(self.mjx_model, mjx_data, ctrl)
-        observation, reward, done, p_goal, aux = self.evaluate_environment(self.observe(mjx_data, p_goal), action)        
+        rng, observation = self.observe(rng, mjx_data, p_goal)  # TODO: revert back to not passing RNG
+
+        rng, ctrl, a_arm, ball_released = self.compute_controls(rng, car_orientation, observation, action, ball_released)
+
+        # noise = self.ctrl_noise*jax.random.uniform(_rng, shape=ctrl.shape, minval=-1.0, maxval=1.0)
+        # ctrl = (1.0 + noise)*ctrl
+        
+        mjx_data, b_prev = self.n_step(mjx_model, mjx_data, ctrl, a_arm, b_prev)
+
+        rng, observation = self.observe(rng, mjx_data, p_goal)
+        observation, reward, done, p_goal, aux = self.evaluate_environment(observation, action, training_step, ball_released)        
 
         truncate = jnp.where(mjx_data.time >= self.time_limit, jnp.array(True), jnp.array(False))
         truncate = jnp.logical_and(truncate, jnp.logical_not(done))
 
-        return (mjx_data, p_goal), observation, reward, done, truncate  
-    
-    # TODO: I want to incorporate multiple step controllers
-    def compute_controls(self, car_orientation: Array, observation: Array, action: Array) -> Array:
-        action = self.scale_action(action, self.act_space.low, self.act_space.high)
-        a_car, a_arm, a_gripper = self.decode_action(action)                                     
+        rng, _rng = jax.random.split(rng)
+        noise = self.observation_noise*jax.random.uniform(_rng, shape=observation.shape, minval=-1.0, maxval=1.0)
+        observation = (1.0 + noise)*observation
 
-        ctrl_arm = self.arm_ctrl(observation, a_arm)
+        return EnvironmentState(rng, mjx_model, mjx_data, p_goal, b_prev, ball_released), observation, reward, done, truncate  
+    
+    def compute_controls(self, rng: KeyArray, car_orientation: Array, observation: Array, action: Array, ball_released: Array) -> tuple[KeyArray, Array, Array, Array]:
+        rng, _rng = jax.random.split(rng)
+
+        action = self.scale_action(action, self.act_space.low, self.act_space.high)
+        a_car, a_arm, a_gripper = self.decode_action(action)
+
+        ctrl_arm = self.arm_ctrl(observation, a_arm) # NOTE: low level control of arm is now done in n_step()
+
+        # Force only releasing once
+        a_gripper = jnp.where(ball_released, -1.0, a_gripper)
+        ball_released = jnp.where(a_gripper <= 0.0, True, ball_released).squeeze()
         ctrl_gripper = self.gripper_ctrl(a_gripper) 
 
         car_local_ctrl = self.car_ctrl(observation, a_car)                                                                                   
@@ -192,46 +240,77 @@ class A_to_B:
 
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
-        return ctrl
+        return rng, ctrl, a_arm, ball_released
 
-    # TODO: for multi step controllers I need to use compute_controls or precompute controls and use ctrl as xs in scan
-    def n_step(self, mjx_model: Model, init_mjx_data: Data, ctrl: Array) -> Data:
+
+    def n_step(self, mjx_model: Model, init_mjx_data: Data, ctrl: Array, a_arm: Array, b_prev: tuple[Array, Array, Array]) -> tuple[Data, tuple[Array, Array, Array]]:
+
+        t_0 = init_mjx_data.time
+        normalizing_factor = 1.0 / (self.mjx_model.opt.timestep * self.steps_per_ctrl)
+
+        b0, b1, b2 = b_prev
+        b3 = a_arm
 
         def f(mjx_data: Data, _):
-            mjx_data = mjx_step(mjx_model, mjx_data.replace(ctrl=ctrl))
+
+            # Spline tracking controller
+            t = (mjx_data.time - t_0)*normalizing_factor
+            _ctrl = ctrl.at[self.nu_car:self.nu_car+self.nu_arm].set(self.arm_low_level_ctrl(
+                t, 
+                mjx_data.qpos[self.nq_car:self.nq_car+self.nq_arm], 
+                mjx_data.qvel[self.nv_car:self.nv_car+self.nv_arm], 
+                mjx_data.qacc[self.nv_car:self.nv_car+self.nv_arm],
+                b0, b1, b2, b3
+            ))
+
+            mjx_data = mjx_step(mjx_model, mjx_data.replace(ctrl=_ctrl))
+
             return mjx_data, _ 
 
         final_mjx_data, _ = jax.lax.scan(f, init_mjx_data, None, length=self.steps_per_ctrl, unroll=False)
-        return final_mjx_data
-    
-    def evaluate_environment(self, observation: Array, action: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
-        (q_car, q_arm, q_gripper, 
-         p_ball, qd_car, qd_arm, 
-         qd_gripper, pd_ball, p_goal, d_goal) = self.decode_observation(observation)                     
 
-        car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max)                          
+        return final_mjx_data, (b1, b2, b3)
+    
+    def evaluate_environment(self, observation: Array, action: Array, training_step: int, ball_released: Array) -> tuple[Array, tuple[Array, Array], Array, Array, tuple[Any,...]]:
+        (
+            q_car, q_arm, q_gripper, p_ball, 
+            qd_car, qd_arm, qd_gripper, pd_ball, 
+            p_goal, 
+            dc_goal,
+            dcc_0, dcc_1, dcc_2, dcc_3,
+            dgc_0, dgc_1, dgc_2, dgc_3,
+            dbc_0, dbc_1, dbc_2, dbc_3,
+            db_target
+         ) = self.decode_observation(observation) 
+
+        car_outside_limits = self.outside_limits(q_car, minval=self.car_limits.q_min, maxval=self.car_limits.q_max) 
         arm_outside_limits = self.outside_limits(qd_arm, minval=self.arm_limits.q_dot_min, maxval=self.arm_limits.q_dot_max)
 
         # TODO: temporary, make self.ball_limits
-        ball_outside_limits_x = self.outside_limits(p_ball[0:1], minval=self.car_limits.x_min, maxval=self.car_limits.x_max)        # type: ignore[assignment]
-        ball_outside_limits_y = self.outside_limits(p_ball[1:2], minval=self.car_limits.y_min, maxval=self.car_limits.y_max)        # type: ignore[assignment]
-        ball_outside_limits_z = self.outside_limits(p_ball[2:3], minval=self.playing_area.z_min, maxval=self.playing_area.z_max)    # type: ignore[assignment]
+        # ball_outside_limits_x = self.outside_limits(p_ball[0:1], minval=self.car_limits.x_min, maxval=self.car_limits.x_max)        # type: ignore[assignment]
+        # ball_outside_limits_y = self.outside_limits(p_ball[1:2], minval=self.car_limits.y_min, maxval=self.car_limits.y_max)        # type: ignore[assignment]
+        ball_outside_limits_z = self.outside_limits(p_ball[2:3], minval=self.playing_area.z_min, maxval=self.playing_area.z_max)    # type: ignore[assignment] 
 
-        car_goal_reached = self.car_goal_reached(q_car, p_goal) # car reaches goal
-        arm_goal_reached = self.arm_goal_reached(q_car, p_ball) # ball hits car
+        car_goal_reached = self.car_goal_reached(q_car, p_goal) # car reaches goal 
+        arm_goal_reached = self.arm_goal_reached(q_car, p_ball) # ball hits car 
 
-        car_goal_reward = 10.0*jnp.astype(car_goal_reached, jnp.float32, copy=True)
-        arm_goal_reward = 10.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True)
-        car_outside_limits_reward = 3.5*jnp.astype(car_outside_limits, jnp.float32, copy=False)
-        arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False)
-        zeus_reward, panda_reward = self.reward_fn(observation, action)
+        # car_goal_reward = 10.0*jnp.astype(car_goal_reached, jnp.float32, copy=True) 
+        # arm_goal_reward = 10.0*jnp.astype(arm_goal_reached, jnp.float32, copy=True) 
+        # car_outside_limits_reward = 3.5*jnp.astype(car_outside_limits, jnp.float32, copy=False) 
+        # arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False) 
+        # arm_velocity_reward = 0.05*jnp.linalg.norm(qd_arm, ord=2)
 
-        zeus_reward = zeus_reward + car_goal_reward - car_outside_limits_reward # - 0.05*(jnp.abs(action[0]) + jnp.abs(action[2])) # - arm_goal_reward
-        panda_reward = panda_reward # + arm_goal_reward #- car_goal_reward - arm_outside_limits_reward 
+        # NOTE: Very quick and dirty way enforce ball release
+        a_gripper = action[-1]
+        a_gripper = jnp.where(ball_released, -1.0, a_gripper)
+        action = action.at[-1].set(a_gripper)
+
+        zeus_reward, panda_reward = self.reward_fn(observation, action, training_step)
+
         reward = (zeus_reward, panda_reward)
 
-        done = jnp.logical_or(car_goal_reached, arm_goal_reached)
-        done = jnp.logical_or(done, jnp.logical_or(ball_outside_limits_x, jnp.logical_or(ball_outside_limits_y, ball_outside_limits_z)))
+        done = jnp.logical_or(car_goal_reached, arm_goal_reached) 
+        done = jnp.logical_or(done, ball_outside_limits_z)
 
         return observation, reward, done, p_goal, (car_goal_reached, arm_goal_reached, car_outside_limits, arm_outside_limits)
     # ---------------------------------------- end step ----------------------------------------- 
@@ -243,14 +322,13 @@ class A_to_B:
     def get_car_orientation(self, mjx_data: Data) -> Array:
         return mjx_data.qpos[self.car_orientation_index]                                                    
 
-    # does the same as: arr.at[index].set(jnp.mod(arr[index], modulus)), but works with numpy arrays as well (which is needed for MuJoCo cpu rollouts)
-    def modulo_at_index(self, arr: Array, index: int, modulus: float) -> Array:
+    def modulo_at_index(self, arr: Array, index: int, modulus: float) -> Array: # does the same as: arr.at[index].set(jnp.mod(arr[index], modulus)), but works with numpy arrays as well (which is needed for MuJoCo cpu rollouts)
         val = jnp.array([jnp.mod(arr[index], modulus)], dtype=jnp.float32)
         out_arr = jnp.concatenate([arr[0 : index], val, arr[index+1 :]], axis=0)
-        # assert jnp.allclose(out_arr, arr.at[index].set(jnp.mod(arr[index], modulus))), "arr should be the same as arr.at[index].set(val)"
         return out_arr
-    
-    def observe(self, mjx_data: Data, p_goal: Array) -> Array:
+
+    def observe(self, rng: KeyArray, mjx_data: Data, p_goal: Array) -> tuple[KeyArray, Array]:
+
         raw_obs = jnp.concatenate([
             mjx_data.qpos,
             mjx_data.qvel,
@@ -259,7 +337,7 @@ class A_to_B:
 
         (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, _p_goal) = self.decode_raw_observation(raw_obs)
 
-        # Manually wrap car orienatation angle
+        # Manually wrap car orienatation angle (since MuJoCo does not)
         q_car = self.modulo_at_index(q_car, self.car_orientation_index, 2*pi) 
 
         # Corners of the playing area
@@ -268,35 +346,43 @@ class A_to_B:
         corner_2 = jnp.array([self.car_limits.x_max, self.car_limits.y_min, self.playing_area.floor_height], dtype=jnp.float32)
         corner_3 = jnp.array([self.car_limits.x_max, self.car_limits.y_max, self.playing_area.floor_height], dtype=jnp.float32)
 
-        # 2D Distance from car to the corners of the playing area
-        dcc_0 = jnp.linalg.norm(corner_0[0:2] - q_car[0:2], ord=2)
-        dcc_1 = jnp.linalg.norm(corner_1[0:2] - q_car[0:2], ord=2)
-        dcc_2 = jnp.linalg.norm(corner_2[0:2] - q_car[0:2], ord=2)
-        dcc_3 = jnp.linalg.norm(corner_3[0:2] - q_car[0:2], ord=2)
+        # 2D Euclidean distance from car to the corners of the playing area
+        dcc_0 = jnp.linalg.norm(corner_0[0:2] - q_car[0:2], ord=2)[jnp.newaxis]
+        dcc_1 = jnp.linalg.norm(corner_1[0:2] - q_car[0:2], ord=2)[jnp.newaxis]
+        dcc_2 = jnp.linalg.norm(corner_2[0:2] - q_car[0:2], ord=2)[jnp.newaxis]
+        dcc_3 = jnp.linalg.norm(corner_3[0:2] - q_car[0:2], ord=2)[jnp.newaxis]
 
-        # 2D Distance from goal to the corners of the playing area
-        dgc_0 = jnp.linalg.norm(corner_0[0:2] - p_goal, ord=2)
-        dgc_1 = jnp.linalg.norm(corner_1[0:2] - p_goal, ord=2)
-        dgc_2 = jnp.linalg.norm(corner_2[0:2] - p_goal, ord=2)
-        dgc_3 = jnp.linalg.norm(corner_3[0:2] - p_goal, ord=2)
+        # 2D Euclidean distance from goal to the corners of the playing area
+        dgc_0 = jnp.linalg.norm(corner_0[0:2] - p_goal, ord=2)[jnp.newaxis]
+        dgc_1 = jnp.linalg.norm(corner_1[0:2] - p_goal, ord=2)[jnp.newaxis]
+        dgc_2 = jnp.linalg.norm(corner_2[0:2] - p_goal, ord=2)[jnp.newaxis]
+        dgc_3 = jnp.linalg.norm(corner_3[0:2] - p_goal, ord=2)[jnp.newaxis]
 
-        # 3D Distance from ball to the corners of the playing area
-        dbc_0 = jnp.linalg.norm(corner_0 - p_ball, ord=2)
-        dbc_1 = jnp.linalg.norm(corner_1 - p_ball, ord=2)
-        dbc_2 = jnp.linalg.norm(corner_2 - p_ball, ord=2)
-        dbc_3 = jnp.linalg.norm(corner_3 - p_ball, ord=2)
+        # 3D Euclidean distance from ball to the corners of the playing area
+        dbc_0 = jnp.linalg.norm(corner_0 - p_ball, ord=2)[jnp.newaxis]
+        dbc_1 = jnp.linalg.norm(corner_1 - p_ball, ord=2)[jnp.newaxis]
+        dbc_2 = jnp.linalg.norm(corner_2 - p_ball, ord=2)[jnp.newaxis]
+        dbc_3 = jnp.linalg.norm(corner_3 - p_ball, ord=2)[jnp.newaxis]
             
-        # Distance from car to the goal
-        dc_goal = jnp.array([jnp.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
+        # 2D Euclidean distance drom car to the goal
+        dc_goal = jnp.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)[jnp.newaxis]
 
-        # Distance from ball to the car (target) 
-        db_target = jnp.linalg.norm(jnp.array([q_car[0], q_car[1], self.playing_area.floor_height + ZeusDimensions.target_height]) - p_ball[0:3], ord=2)
+        # 3D Euclidean distance from ball to the car (target) 
+        db_target = jnp.linalg.norm(jnp.array([q_car[0], q_car[1], self.playing_area.floor_height + ZeusDimensions.target_height]) - p_ball[0:3], ord=2)[jnp.newaxis]
 
         obs = jnp.concatenate([
-            q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, dc_goal, #dcc_0, dcc_1, dcc_2, dcc_3, dgc_0, dgc_1, dgc_2, dgc_3
+            q_car, q_arm, q_gripper, p_ball,        # poses
+            qd_car, qd_arm, qd_gripper, pd_ball,    # velocities 
+            p_goal,                                 # car goal
+            dc_goal,                                # distance from car to goal
+            dcc_0, dcc_1, dcc_2, dcc_3,             # distances from car to corners
+            dgc_0, dgc_1, dgc_2, dgc_3,             # distances from goal to corners
+            dbc_0, dbc_1, dbc_2, dbc_3,             # distances from ball to corners
+            db_target                               # distance from ball to car (target)
         ], axis=0)
 
-        return obs
+
+        return rng, obs
 
 
     def decode_raw_observation(self, observation: Array) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
@@ -315,23 +401,61 @@ class A_to_B:
                 )
         # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal)
 
-    def decode_observation(self, observation: Array) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    def decode_observation(
+            self, observation: Array
+            ) -> tuple[Array, Array, Array, Array, 
+                       Array, Array, Array, Array, 
+                       Array, 
+                       Array, 
+                       Array, Array, Array, Array, 
+                       Array, Array, Array, Array, 
+                       Array, Array, Array, Array, 
+                       Array]:
+
         n_pos_ball = self.nq_ball - 4       # can't observe orientation of ball
         n_lin_vel_ball = self.nv_ball - 3   # can't observe angular velocity of ball
         return (
+                # Poses
                 observation[0 : self.nq_car],                                                                                                                                                                                                                       
                 observation[self.nq_car : self.nq_car + self.nq_arm],                                                                                                                                                                                               
                 observation[self.nq_car + self.nq_arm : self.nq_car + self.nq_arm + self.nq_gripper],                                                                                                                                                               
                 observation[self.nq_car + self.nq_arm + self.nq_gripper : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball], # can't observe orientation of ball                                                                                        
+
+                # Velocities
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car],                                                                                                 
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm],                                                                     
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper],                                     
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball],  # can't observe angular velocity of ball   
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal : ]
-                )
-        # -> (q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, d_goal)
 
+                # Car goal
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal],
+
+                # Relative distances
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 13],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 13 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 14],
+                )
+        # -> (q_car, q_arm, q_gripper, p_ball, 
+        #     qd_car, qd_arm, qd_gripper, pd_ball, 
+        #     p_goal, 
+        #     d_goal,
+        #     dcc_0, dcc_1, dcc_2, dcc_3,
+        #     dgc_0, dgc_1, dgc_2, dgc_3,
+        #     dbc_0, dbc_1, dbc_2, dbc_3,
+        #     db_target)
+
+    # WARNING: this function is quite brittle to change in action definitions
     def decode_action(self, action: Array) -> tuple[Array, Array, Array]:
         return (
                 action[0 : self.nu_car],                                                                            
@@ -395,15 +519,21 @@ class A_to_B:
     def car_goal_reached(self, q_car: Array, p_goal: Array) -> Array:
         return jnp.less_equal(jnp.linalg.norm(q_car[:2] - p_goal, ord=2), self.goal_radius)                           
 
-    def arm_goal_reached(self, q_car: Array, q_ball: Array) -> Array: # WARNING: hardcoded height
-        return jnp.linalg.norm(jnp.stack([q_car[0], q_car[1], 0.1], axis=0) - q_ball[:3]) <= self.goal_radius 
+    def arm_goal_reached(self, q_car: Array, q_ball: Array) -> Array: 
+        return jnp.linalg.norm(jnp.stack([q_car[0], q_car[1], self.playing_area.floor_height], axis=0) - q_ball[:3]) <= self.goal_radius 
 
+    # NOTE: should identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
     def car_local_polar_to_global_cartesian(self, orientation: Array, magnitude: Array, angle: Array, omega: Array) -> Array:
-        # TODO: identify approximate car angle-velocity relationship, using linear scaling based on distance from 45 degrees for now
-        def car_velocity_modifier(theta: Array) -> Array:
+
+        def angle_velocity_modifier(theta: Array) -> Array:
             return 0.5 + 0.5*( jnp.abs( ( jnp.mod(theta, (pi/2.0)) ) - (pi/4.0) ) / (pi/4.0) )
 
-        velocity = car_velocity_modifier(angle)*magnitude                                           
+        def rotation_velocity_modifier(velocity: Array, omega: Array) -> Array:
+            return jnp.clip(velocity - jnp.abs(omega), 0.0, velocity)
+
+        velocity = angle_velocity_modifier(angle)*magnitude                                           
+        velocity = rotation_velocity_modifier(velocity, omega)
+
         velocity_x = velocity*jnp.cos(angle)
         velocity_y = velocity*jnp.sin(angle)
 
@@ -421,18 +551,14 @@ def main():
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation 
     from mujoco import MjModel, MjData, mj_name2id, mjtObj, mjx, MjvCamera, Renderer, mj_forward # type: ignore[import]
-    from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance, zero_reward 
-    from inference.controllers import arm_PD, gripper_ctrl, arm_fixed_pose, gripper_always_grip, car_fixed_pose 
-    from algorithms.utils import FakeTrainState, ActorInput, initialize_actors, actor_forward
+    from environments.reward_functions import curriculum_reward
+    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
+    from algorithms.utils import FakeTrainState, ActorInput, initialize_actors
     from algorithms.mappo_jax import step_and_reset_if_done
 
     import pdb 
 
     SCENE = "mujoco_models/scene.xml"
-    OUTPUT_DIR = "demos/assets/"
-    COMPILATION_CACHE_DIR = "./compiled_functions"
-
-    jax.experimental.compilation_cache.compilation_cache.set_cache_dir(COMPILATION_CACHE_DIR)
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -443,19 +569,13 @@ def main():
     num_envs = 1
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = car_only_negative_distance,
-        # car_ctrl       = car_fixed_pose,
-        arm_ctrl       = arm_fixed_pose,
-        gripper_ctrl   = gripper_always_grip,
+        reward_fn      = partial(curriculum_reward, 20_000_000),
+        # arm_ctrl       = ,
+        arm_low_level_ctrl = arm_spline_tracking_controller,
+        gripper_ctrl   = gripper_ctrl,
         goal_radius    = 0.1,
         steps_per_ctrl = 20,
         time_limit     = 4.0,
-        num_envs       = num_envs,
-        prng_seed      = reproducibility_globals.PRNG_SEED,
-        # obs_min        =
-        # obs_max        =
-        act_min        = jnp.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, jnp.array([-1.0])], axis=0),
-        act_max        = jnp.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, jnp.array([1.0])], axis=0)
     )
 
     env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
@@ -473,12 +593,13 @@ def main():
     rnn_hidden_size = 32
     rnn_fc_size = 256
 
-    jit_actor_forward = jax.jit(actor_forward)
-    jit_step_and_reset_if_done = jax.jit(partial(step_and_reset_if_done, env))
-
     act_sizes = jax.tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
     actors, actor_hidden_states = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
+    actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
     actors.train_states = jax.tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
+
+    jit_actor_forward_fns = tuple(jax.jit(f, static_argnames="train") for f in actor_forward_fns) 
+    jit_step_and_reset_if_done = jax.jit(partial(step_and_reset_if_done, env))
 
     frames = []
     fig, ax = plt.subplots()
@@ -487,14 +608,17 @@ def main():
     num_rollouts = 1
     num_env_steps = 100
 
+
     for rollout in range(num_rollouts):
         print("rollout:", rollout, "of", num_rollouts)
 
         rng, rng_r, rng_a = jax.random.split(rng, 3)
 
-        environment_state, observation = env.reset(rng_r, mjx_data)
-        start_times = jnp.linspace(0.0, env.time_limit, num=num_envs, endpoint=False).squeeze()
-        environment_state = (environment_state[0].replace(time=start_times), environment_state[1])
+        _p_goal = jnp.zeros((1, 2))
+        _b_prev = (jnp.zeros((1, env.nq_arm)), jnp.zeros((1, env.nq_arm)), jnp.zeros((1, env.nq_arm)))
+        _ball_released = jnp.zeros(False)
+        environment_state = EnvironmentState(rng, mjx_model, mjx_data, _p_goal, _b_prev, _ball_released)
+        environment_state, observation = env.reset(environment_state)
 
         done = jnp.zeros(num_envs, dtype=bool)
         truncate = jnp.zeros(num_envs, dtype=bool)
@@ -515,36 +639,34 @@ def main():
                     ActorInput(observation[jnp.newaxis, :][jnp.newaxis, :], reset[jnp.newaxis, :]) 
                     for _ in range(env.num_agents)
             )
-            network_params = jax.tree_map(lambda ts: ts.params, actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
 
-            actor_hidden_states, policies, actors.running_stats = zip(*jax.tree_map(jit_actor_forward,
-                    actors.networks,
-                    network_params,
+            actor_hidden_states, policies = zip(*jax.tree_map(
+                lambda apply_fn, ts, vars, hs, ins: apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
+                    jit_actor_forward_fns, 
+                    actors.train_states,
+                    actors.vars,
                     actor_hidden_states,
                     actor_inputs,
-                    actors.running_stats,
                     is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
             ))
 
             actions = jax.tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = jnp.concatenate(actions, axis=-1)
 
-            # NOTE: for testing actions
-            # environment_action = environment_action.at[0:3].set(jnp.array([0.0, -0.5, 0.0]))
-            
-            environment_state, observation, terminal_observation, rewards, done, truncate = jit_step_and_reset_if_done(reset_rngs, environment_state, environment_action)
+            domain_randomized_model = env.randomize_domain(reset_rngs)
+
+            environment_state, observation, terminal_observation, rewards, done, truncate = jit_step_and_reset_if_done(environment_state, environment_action, domain_randomized_model)
             done = done[jnp.newaxis]
             truncate = truncate[jnp.newaxis]
 
             car_reward, arm_reward = rewards
-            mjx_data, p_goal = environment_state
+            rng, mjx_model, mjx_data, p_goal = environment_state
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = jnp.concatenate((p_goal, jnp.array([0.115])), axis=0)  # goal visualization
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = jnp.clip(1.4142136*car_reward + 1.0, -1.05, 1.05)
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = jnp.clip(arm_reward, -1.05, 1.05)
             data = mjx.get_data(model, mjx_data)
             mj_forward(model, data)
-            # env.mjx_model = mjx.put_model(model)
 
             renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())

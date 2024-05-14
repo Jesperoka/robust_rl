@@ -16,7 +16,7 @@ if __name__=="__main__":
         COMPILATION_CACHE_DIR = join(dirname(abspath(__file__)), "..", "compiled_functions")
 
         jax.config.update("jax_compilation_cache_dir", COMPILATION_CACHE_DIR)
-        jax.config.update("jax_raise_persistent_cache_errors", True)
+        jax.config.update("jax_raise_persistent_cache_errors", False)
         jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.9)
         jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
         jax.config.update("jax_debug_nans", False) 
@@ -32,13 +32,13 @@ if __name__=="__main__":
 
 import jax.numpy as jnp
 
-from mujoco.mjx import Data
+from mujoco.mjx import Data, Model
 from jax import Array 
 from jax._src.random import KeyArray 
 from flax.typing import VariableDict
 from functools import partial
 from typing import Any, Callable, NamedTuple, TypeAlias 
-from environments.A_to_B_jax import A_to_B
+from environments.A_to_B_jax import A_to_B, EnvironmentState
 from algorithms.config import AlgorithmConfig
 from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, update_stats, l1_loss, l2_loss
 from algorithms.visualize import PlotMetrics
@@ -92,8 +92,9 @@ class EnvStepCarry(NamedTuple):
     critics:                MultiCriticRNN
     actor_hidden_states:    tuple[Array, ...]
     critic_hidden_states:   tuple[Array, ...]
-    environment_state:      tuple[Data, Array] # TODO: make type
+    environment_state:      EnvironmentState
     return_stats:           tuple[RunningStats, ...] # 
+    training_step:          int
 
 class MinibatchCarry(NamedTuple):
     actors:         MultiActorRNN
@@ -128,16 +129,21 @@ TrainStepMetrics: TypeAlias = EpochMetrics # type alias for stacked epoch metric
 
 def step_and_reset_if_done(
         env: A_to_B,
-        reset_rng: KeyArray, 
-        env_state: tuple[Data, Array], 
+        env_state: EnvironmentState, 
         env_action: Array,
-        ) -> tuple[tuple[Data, Array], Array, Array, tuple[Array, ...], Array, Array]:
+        domain_randomized_mjx_model: Model,
+        training_step: int
+        ) -> tuple[EnvironmentState, Array, Array, tuple[Array, ...], Array, Array]:
     
     # The observation from step is used when resetting, IF we are resetting because of a truncation
-    (mjx_data, p_goal), observation, rewards, terminal, truncated = env.step(*env_state, env_action)
+    next_env_state, observation, rewards, terminal, truncated = env.step(env_state, env_action, training_step)
 
-    def reset(): return *env.reset(reset_rng, mjx_data), observation, rewards, terminal, truncated
-    def step(): return (mjx_data, p_goal), observation, observation, rewards, terminal, truncated 
+    def reset(): 
+        env_state_with_randomized_model = EnvironmentState(env_state.rng, domain_randomized_mjx_model, env_state.mjx_data, env_state.p_goal, env_state.b_prev, env_state.ball_released)
+        reset_env_state, reset_observation = env.reset(env_state_with_randomized_model)
+        return reset_env_state, reset_observation, observation, rewards, terminal, truncated
+
+    def step(): return next_env_state, observation, observation, rewards, terminal, truncated 
 
     return jax.lax.cond(jnp.logical_or(terminal, truncated), reset, step)
 
@@ -241,8 +247,9 @@ def env_step(
         carry: EnvStepCarry, step_rng: KeyArray     # remaining args after partial()
         ) -> tuple[EnvStepCarry, Transition]:
 
-    reset_rngs, *action_rngs = jax.random.split(step_rng, env.num_agents+1)
-    reset_rngs = jax.random.split(reset_rngs, num_envs)
+    step_rng, *action_rngs = jax.random.split(step_rng, env.num_agents+1)
+    domain_rand_rng = jax.random.split(step_rng, num_envs)
+
 
     # Gather inputs to the actors
     reset = jnp.logical_or(carry.terminal, carry.truncated)
@@ -288,11 +295,14 @@ def env_step(
             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
     
+    # Domain randomization
+    domain_randomized_mjx_model = jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
+
     # Step environment
     environment_state, observation, terminal_observation, rewards, terminal, truncated = jax.vmap(
             step_and_reset_if_done, 
-            in_axes=(None, 0, 0, 0),
-    )(env, reset_rngs, carry.environment_state, environment_actions)
+            in_axes=(None, 0, 0, 0, None),
+    )(env, carry.environment_state, environment_actions, domain_randomized_mjx_model, carry.training_step)
 
     # Normalize rewards (based on return standard deviations) 
     # WARNING: renaming output to disable
@@ -330,6 +340,7 @@ def env_step(
             actor_hidden_states=actor_hidden_states, 
             critic_hidden_states=critic_hidden_states, 
             environment_state=environment_state, 
+            training_step=carry.training_step
     ) 
 
     return carry, transition
@@ -614,7 +625,6 @@ def train_step(
             is_leaf = lambda x: not isinstance(x, tuple)
     ))
 
-
     epoch_carry = EpochCarry(
             actors=env_final.actors, 
             critics=env_final.critics, 
@@ -644,6 +654,7 @@ def train_step(
             actor_hidden_states=env_final.actor_hidden_states, 
             critic_hidden_states=env_final.critic_hidden_states, 
             environment_state=env_final.environment_state,
+            training_step=carry.step_count + 1
     )
     carry = TrainStepCarry(
             env_step_carry=updated_env_step_carry, 
@@ -664,8 +675,6 @@ def train_step(
                 rollout_generator_queue.put_nowait((actors, step))
             except Full:
                 pass
-
-            # TODO: MAYBE async checkpointing
 
             if step >= num_updates:
                 rollout_generator_queue.put((None, None))
@@ -783,10 +792,22 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
         # Init the environment and carries for the scanned training loop
         # -------------------------------------------------------------------------------------------------------
+        mjx_model_batch = jax.vmap(env.randomize_domain, in_axes=0)(reset_rngs)
         mjx_data_batch = jax.vmap(env.mjx_data.replace, axis_size=config.num_envs, out_axes=0)()
-        _environment_state, init_observations = jax.vmap(env.reset, in_axes=(0, 0))(reset_rngs, mjx_data_batch)
-        start_times = jnp.linspace(0.0, env.time_limit, num=config.num_envs, endpoint=False).squeeze()
-        init_environment_state = (_environment_state[0].replace(time=start_times), _environment_state[1]) # TODO: make environment_state a NamedTuple
+        _p_goal = jnp.zeros((config.num_envs, 2))
+        _b_prev = (jnp.zeros((config.num_envs, env.nq_arm)), jnp.zeros((config.num_envs, env.nq_arm)), jnp.zeros((config.num_envs, env.nq_arm)))
+        _ball_released = jnp.zeros(config.num_envs, dtype=bool)
+        _environment_state, init_observations = jax.vmap(env.reset, in_axes=0)(EnvironmentState(reset_rngs, mjx_model_batch, mjx_data_batch, _p_goal, _b_prev, _ball_released))
+
+        start_times = jnp.linspace(0.0, env.time_limit, num=config.num_envs, endpoint=False).squeeze() # to evenly distribute time-based truncations
+        init_environment_state = EnvironmentState(
+                reset_rngs, 
+                _environment_state.mjx_model, 
+                _environment_state.mjx_data.replace(time=start_times), 
+                _environment_state.p_goal, 
+                _environment_state.b_prev,
+                _environment_state.ball_released
+        )
 
         init_returns = tuple(jnp.zeros(config.num_envs, dtype=jnp.float32) for _ in range(env.num_agents))
         init_return_stats = tuple(RunningStats(jnp.zeros([1]), jnp.zeros([1]), 0, 1) for _ in range(env.num_agents))
@@ -822,6 +843,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
                 actor_hidden_states=init_actor_hidden_states, 
                 critic_hidden_states=init_critic_hidden_states, 
                 environment_state=init_environment_state, 
+                training_step=0
         )
 
         train_step_carry = TrainStepCarry(
@@ -848,11 +870,11 @@ def main():
     from environments.A_to_B_jax import A_to_B
     from environments.options import EnvironmentOptions
     from environments.physical import ZeusLimits, PandaLimits
-    from environments.reward_functions import inverse_distance, car_only_inverse_distance, car_only_negative_distance, minus_car_only_negative_distance, zero_reward, car_reward
-    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, checkpoint_utils
+    from environments.reward_functions import car_only_negative_distance, curriculum_reward 
+    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import arm_PD, gripper_ctrl, arm_fixed_pose, gripper_always_grip 
+    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
     from algorithms.visualize import data_displayer, rollout_generator
     from algorithms.utils import FakeTrainState
     from multiprocessing import Process, set_start_method
@@ -881,32 +903,13 @@ def main():
     num_envs = 4096 
     minibatch_size = 64 
 
-    options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = car_only_negative_distance,
-        arm_ctrl       = arm_fixed_pose,
-        gripper_ctrl   = gripper_always_grip,
-        goal_radius    = 0.1,
-        steps_per_ctrl = 20,
-        time_limit     = 3.0,
-        num_envs       = num_envs,
-        prng_seed      = reproducibility_globals.PRNG_SEED,
-        # obs_min        =
-        # obs_max        =
-        act_min        = jnp.concatenate([ZeusLimits().a_min, PandaLimits().tau_min, jnp.array([-1.0])], axis=0),
-        act_max        = jnp.concatenate([ZeusLimits().a_max, PandaLimits().tau_max, jnp.array([1.0])], axis=0)
-    )
-
-    env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
-
-    rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
-
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
         num_env_steps   = 3,
-        # total_timesteps = 209_715_200,
+        total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
-        total_timesteps = 20_971_520,
+        # total_timesteps = 20_971_520,
         # total_timesteps = 2_097_152,
         update_epochs   = 5,
         num_minibatches = num_envs // minibatch_size,
@@ -918,17 +921,31 @@ def main():
         vf_coef         = 0.5,
         max_grad_norm   = 0.5,
         env_name        = "A_to_B_jax",
-        rnn_hidden_size = 32, # 8
+        rnn_hidden_size = 16, # 32
         rnn_fc_size     = 64 
     )
-
     config.num_actors = config.num_envs # env.num_agents * config.num_envs
     config.num_updates = config.total_timesteps // config.num_env_steps // config.num_envs
     config.minibatch_size = config.num_actors // config.num_minibatches # config.num_actors * config.num_env_steps // config.num_minibatches
-    config.clip_eps = config.clip_eps / env.num_agents if config.scale_clip_eps else config.clip_eps
-    print("\n\nconfig:\n\n")
+
+    options: EnvironmentOptions = EnvironmentOptions(
+        reward_fn           = partial(curriculum_reward, config.num_updates),
+        # arm_ctrl            = ,
+        arm_low_level_ctrl  = arm_spline_tracking_controller,
+        gripper_ctrl        = gripper_ctrl,
+        goal_radius         = 0.05,
+        steps_per_ctrl      = 20,
+        time_limit          = 3.0,
+    )
+
+    print("\n\nenvironment options:\n\n")
+    pprint(options)
+    print("\n\nalgorithm config:\n\n")
     pprint(config)
 
+    env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
+
+    rng = jax.random.PRNGKey(reproducibility_globals.PRNG_SEED)
 
     # Need to run rollout once to jit before multiprocessing
     act_sizes = jax.tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
@@ -968,9 +985,8 @@ def main():
 
 
     print("\n\nsaving actors...\n")
-    # restore_args = checkpoint_utils.construct_restore_args(env_final.actors)
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    checkpointer.save(join(CHECKPOINT_DIR,"checkpoint_TEST"), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
+    checkpointer.save(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     print("\n...actors saved.\n\n")
 
     rollout_generator_process.join()
@@ -989,7 +1005,7 @@ def main():
     actors, actor_hidden_states = initialize_actors(rngs, num_envs, env.num_agents, obs_size, act_sizes, config.lr, config.max_grad_norm, config.rnn_hidden_size, config.rnn_fc_size)
 
     print("\nrestoring actors...\n")
-    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_TEST"), state=actors, args=args.PyTreeRestore(actors))
+    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_actors.train_states[0].params))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[1].params, restored_actors.train_states[1].params))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[0], restored_actors.vars[0]))

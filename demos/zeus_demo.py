@@ -14,7 +14,7 @@ async def websocket_client():
 
         message = json.dumps({"A": -1.5708, "B": 0.8, "C": 0.0, "D": 4})
         print(message)
-        await websocket.send(message+">")
+        await websocket.send(message)
         print(f"\n> {message}\n")
 
         # Waiting for a response (e.g., "pong")
