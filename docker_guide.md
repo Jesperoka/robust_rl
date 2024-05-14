@@ -2,7 +2,7 @@
 
 ## General guide
 
-*Note: robodart specific commands [below](#robodart-specific-commands)*<br><br>
+*Note: Robust RL specific commands [below](#robust-rl-specific-commands)*<br><br>
 
 To build docker container (from inside ~/where_my_dockerfile_is/):
 ```sh
@@ -30,34 +30,36 @@ docker run -it \
     $(docker build -q .)
 ```
 
-## Robodart Specific Commands
+## Robust RL Specific Commands
 
 #### Setup
 
-1. Put dockerfile in `~/robodart`.
+1. Put dockerfile in `~/robust_rl` (it should already be there).
 
-2. Clone `robodart_exploration/` inside `~/robodart/`
+2. Clone `robust_rl/` inside `~/thesis/`
 
-3. Build container from dockerfile:
+3. While in `robust_rl/`, build container from dockerfile by running (here, `robust` is the name we give to the container):
 ```sh
-docker build -t robodart .
+docker build -t robust .
 ```
+4. Allow docker to connect to X11
 ```sh
 xhost +local:docker
 ```
-#### Running
+#### Running the container
 
-Run the following command from `~/robodart/`:
+Run the following command from ~\~/robodart/~ `robust_rl/`:
 ```sh
-docker run -it --net=host --privileged --mount type=bind,source=$(pwd)/robodart_exploration,target=/robodart_exploration robodart:latest
+docker run -it --net=host --privileged --mount type=bind,source=$(pwd)/robodart_exploration,target=/robodart_exploration robust:latest
 ```
+or to enable X11 graphics:
 ```sh
-docker run -e DISPLAY=$DISPLAY  -v /tmp/.X11-unix:/tmp/.X11-unix -it --net=host --privileged --mount type=bind,source=$(pwd)/robodart_exploration,target=/robodart_exploration robodart:latest
+docker run -e DISPLAY=$DISPLAY  -v /tmp/.X11-unix:/tmp/.X11-unix -it --net=host --privileged --mount type=bind,source=$(pwd),target=/robust_rl robust:latest
 ```
 
-and **while in the docker container** you can navigate to `robodart_exploration`:
+and **while in the docker container** you can navigate to `robust_rl/`:
 ```sh
-cd robodart_exploration
+cd robust_rl
 ```
 run python files with:
 ```sh
@@ -67,13 +69,13 @@ and to exit the container run:
 ```sh
 exit
 ```
-All changes made to `robodart_exploration`, both within the Docker container and outside the container (on the host machine) are synced. As it stands no other files remain after exiting the container, so if you want to save a file, save it inside `robodart_exploration`.
+All changes made to `robust_rl/`, both within the Docker container and outside the container (on the host machine) are synced. As it stands no other files remain after exiting the container, so if you want to save a file, save it inside `robust_rl`.
 
 While `docker run` creates and then starts a container. A stopped container be started with:
 ```sh
 docker start -a -i name_of_container
 ```
-where `name_of_container` can be specified during creation, or they will be pseudo-randomly created and you can run:
+where `name_of_container` can be specified during creation using the `--name <name>` option, or they will be pseudo-randomly created and you can run:
 ```sh
 docker ps -a
 ```

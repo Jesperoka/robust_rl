@@ -3,6 +3,7 @@
 *.onnx
 *.torchscript
 runs/
+sens.txt
 
 
 ### FROM TEMPLATE BELOW ###
