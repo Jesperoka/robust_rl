@@ -22,7 +22,7 @@ RUN apt-get install -y \
     xorg-dev \
     libusb-dev \
     x11-apps \
-    python3.12 \ 
+    python3.12 \
     python3-pip \
     pybind11-dev \
     catch2 \
@@ -39,7 +39,7 @@ RUN apt-get install -y \
     libglu1-mesa-dev \
     v4l-utils \
     gettext \
-    udev 
+    udev
 
 # Make python 3.12 the only python
 RUN rm -f /usr/bin/python3
@@ -104,10 +104,12 @@ RUN pip install --upgrade --break-system-packages "jax[cpu]"
 # Other python dependencies
 RUN pip install --upgrade --break-system-packages \
     numpy \
+    numba \
     matplotlib \
     opencv-python \
     pupil-apriltags \
-    mujoco-mjx
+    mujoco-mjx \
+    orbax
 
 # Neovim for development (remove this if you're not planning on using neovim to develop on the lab computer)
 WORKDIR /
@@ -119,14 +121,14 @@ RUN cd neovim\
 WORKDIR /
 RUN apt install ripgrep
 RUN cd ~ \
- && mkdir .config \ 
+ && mkdir .config \
  && cd .config \
  && git clone https://github.com/ThePrimeagen/neovimrc.git \
  && mv neovimrc/ nvim/ \
  && cd /root \
  && mkdir personal \
  && cd personal \
- && git clone https://github.com/ThePrimeagen/harpoon.git \ 
+ && git clone https://github.com/ThePrimeagen/harpoon.git \
  && cd harpoon \
  && git switch harpoon2
 
