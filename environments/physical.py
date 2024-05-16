@@ -8,9 +8,9 @@ from math import pi
 
 @dataclass(frozen=True)
 class PlayingArea:
-    x_center:       float = 1.1 # m
+    x_center:       float = 0.6 # m
     y_center:       float = 0.0 # m
-    half_x_length:  float = 1.0 # m
+    half_x_length:  float = 0.5 # m
     half_y_length:  float = 1.0 # m
     z_min:          float = 0.0 # m
     z_max:          float = 3.5 # m

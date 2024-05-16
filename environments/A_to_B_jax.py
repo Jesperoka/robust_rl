@@ -1,4 +1,3 @@
-from jax._src.random import KeyArray
 import reproducibility_globals
 import jax
 import chex
@@ -8,6 +7,7 @@ from typing import Any, Callable, NamedTuple
 from math import pi
 
 from jax import Array, numpy as jnp
+from jax._src.random import KeyArray
 from chex import PRNGKey
 from mujoco.mjx import Model, Data, forward as mjx_forward, step as mjx_step 
 from environments.options import EnvironmentOptions 
@@ -62,7 +62,7 @@ class A_to_B:
         self.mjx_data: Data = mjx_data 
         self.grip_site_id: int = grip_site_id
 
-        self.reward_fn:       Callable[[Array, Array, int], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
+        self.reward_fn:       Callable[[Array, Array, Array, int], tuple[Array, Array]] = partial(options.reward_fn, self.decode_observation)
         self.car_ctrl:        Callable[[Array, Array], Array] = partial(options.car_ctrl, self.decode_observation)
         self.arm_ctrl:        Callable[[Array, Array], Array] = partial(options.arm_ctrl, self.decode_observation)
         self.gripper_ctrl:    Callable[[Array], Array] = options.gripper_ctrl 
@@ -97,8 +97,9 @@ class A_to_B:
         self.density_noise:         float = options.density_noise       # kg/m^3    (+)     density = density + noise
         self.viscosity_noise:       float = options.viscosity_noise     # kg/m/s    (+)     visc = visc + noise
         self.gravity_noise:         float = options.gravity_noise       # m/s^2     (+)     gravity = gravity + noise
-        self.actuator_gain_noise:   float = options.actuator_gain_noise #           (+)     actuator_gainprm = actuator_gainprm + noise
-        self.actuator_bias_noise:   float = options.actuator_bias_noise #           (+)     actuator_biasprm = actuator_biasprm + noise
+        self.actuator_gain_noise:   float = options.actuator_gain_noise # fraction  [*]     actuator_gainprm = (1 + noise)*actuator_gainprm 
+        self.actuator_bias_noise:   float = options.actuator_bias_noise # fraction  [*]     actuator_biasprm = (1 + noise)*actuator_biasprm 
+        self.actuator_dyn_noise:    float = options.actuator_dyn_noise  # fraction  [*]     actuator_dynprm = (1 + noise)*actuator_dynprm 
         self.observation_noise:     float = options.observation_noise   # fraction  [*]     obs = (1 + noise)*obs
         self.ctrl_noise:            float = options.ctrl_noise          # fraction  [*]     act = (1 + noise)*act
 
@@ -171,7 +172,7 @@ class A_to_B:
 
         return rng, q_ball, qd_ball, p_goal                                                      
 
-    def randomize_domain(self, rng: KeyArray) -> Model:
+    def randomize_domain(self, rng: KeyArray) -> Model: # NOTE: this function
         _rngs = jax.random.split(rng, 10)
 
         return self.mjx_model.tree_replace({ # type: ignore[assignment]
@@ -185,8 +186,22 @@ class A_to_B:
                     viscosity = self.mjx_model.opt.viscosity + jax.random.uniform(_rngs[6], minval=0, maxval=self.viscosity_noise), 
                     density = self.mjx_model.opt.density + jax.random.uniform(_rngs[7], minval=0, maxval=self.density_noise)
                     ),
-                    "actuator_gainprm": self.mjx_model.actuator_gainprm.at[:, 0].set(self.mjx_model.actuator_gainprm[:, 0] + jax.random.uniform(_rngs[8], minval= -self.actuator_gain_noise, maxval=self.actuator_gain_noise)),
-                    "actuator_biasprm": self.mjx_model.actuator_biasprm.at[:, 1].set(self.mjx_model.actuator_biasprm[:, 1] + jax.random.uniform(_rngs[9], minval= -self.actuator_bias_noise, maxval=self.actuator_bias_noise))
+                    "actuator_gainprm": 
+                        self.mjx_model.actuator_gainprm.at[:, 0].set(
+                            self.mjx_model.actuator_gainprm[:, 0]* 
+                            (1.0 + jax.random.uniform(_rngs[8], shape=self.mjx_model.actuator_gainprm[:, 0].shape, minval= -self.actuator_gain_noise, maxval=self.actuator_gain_noise))
+                        ),
+                    "actuator_biasprm": 
+                        self.mjx_model.actuator_biasprm.at[:, 1:3].set(
+                            self.mjx_model.actuator_biasprm[:, 1:3]*
+                            (1.0 + jax.random.uniform(_rngs[9], shape=self.mjx_model.actuator_biasprm[:, 1:3].shape, minval= -self.actuator_bias_noise, maxval=self.actuator_bias_noise))
+                        ),
+                    "actuator_dynprm": 
+                        self.mjx_model.actuator_dynprm.at[:, 0].set(
+                            self.mjx_model.actuator_dynprm[:, 0]*
+                            (1.0 + jax.random.uniform(_rngs[9], shape=self.mjx_model.actuator_dynprm[:, 0].shape, minval= -self.actuator_dyn_noise, maxval=self.actuator_dyn_noise))
+                        ),
+
                 })
 
     # ---------------------------------------- end reset ---------------------------------------- 
@@ -203,18 +218,22 @@ class A_to_B:
         car_orientation = self.get_car_orientation(mjx_data)
         rng, observation = self.observe(rng, mjx_data, p_goal)  # TODO: revert back to not passing RNG
 
-        rng, ctrl, a_arm, ball_released = self.compute_controls(rng, car_orientation, observation, action, ball_released)
+        rng, ctrl, a_arm, a_gripper, ball_released = self.compute_controls(rng, car_orientation, observation, action, ball_released)
 
         # noise = self.ctrl_noise*jax.random.uniform(_rng, shape=ctrl.shape, minval=-1.0, maxval=1.0)
         # ctrl = (1.0 + noise)*ctrl
         
-        mjx_data, b_prev = self.n_step(mjx_model, mjx_data, ctrl, a_arm, b_prev)
+        mjx_data, b_prev = self.n_step(mjx_model, mjx_data, ctrl, a_arm, b_prev, a_gripper)
 
         rng, observation = self.observe(rng, mjx_data, p_goal)
         observation, reward, done, p_goal, aux = self.evaluate_environment(observation, action, training_step, ball_released)        
 
-        truncate = jnp.where(mjx_data.time >= self.time_limit, jnp.array(True), jnp.array(False))
-        truncate = jnp.logical_and(truncate, jnp.logical_not(done))
+        # NOTE: not using truncation because the ball is released often enough that there is no need
+        # and since correctly bootstrapping the value function at truncation points has shown itself to cause instability,
+        # it is more practical to avoid truncation in this case. 
+        truncate = jnp.array(False)
+        # truncate = jnp.where(mjx_data.time >= self.time_limit, jnp.array(True), jnp.array(False))
+        # truncate = jnp.logical_and(truncate, jnp.logical_not(done))
 
         rng, _rng = jax.random.split(rng)
         noise = self.observation_noise*jax.random.uniform(_rng, shape=observation.shape, minval=-1.0, maxval=1.0)
@@ -222,28 +241,29 @@ class A_to_B:
 
         return EnvironmentState(rng, mjx_model, mjx_data, p_goal, b_prev, ball_released), observation, reward, done, truncate  
     
-    def compute_controls(self, rng: KeyArray, car_orientation: Array, observation: Array, action: Array, ball_released: Array) -> tuple[KeyArray, Array, Array, Array]:
+    def compute_controls(self, rng: KeyArray, car_orientation: Array, observation: Array, action: Array, ball_released: Array) -> tuple[KeyArray, Array, Array, Array, Array]:
         rng, _rng = jax.random.split(rng)
 
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)
 
-        ctrl_arm = self.arm_ctrl(observation, a_arm) # NOTE: low level control of arm is now done in n_step()
+        ctrl_arm = self.arm_ctrl(observation, a_arm) # NOTE: low level control of arm is now done in n_step(). Could remove this
 
         # Force only releasing once
-        a_gripper = jnp.where(ball_released, -1.0, a_gripper)
-        ball_released = jnp.where(a_gripper <= 0.0, True, ball_released).squeeze()
-        ctrl_gripper = self.gripper_ctrl(a_gripper) 
+        a_gripper = jnp.where(ball_released, 0.0, a_gripper).squeeze() # if ball is already released, the gripper will act as if trying to release the ball immediately
+        ball_released = jnp.where(a_gripper >= 0.0, True, ball_released).squeeze()
 
-        car_local_ctrl = self.car_ctrl(observation, a_car)                                                                                   
+        ctrl_gripper = self.gripper_ctrl(a_gripper)  # NOTE: low level control of gripper is now done in n_step(). Could remove this
+
+        car_local_ctrl = self.car_ctrl(observation, a_car)         
         ctrl_car = self.car_local_polar_to_global_cartesian(car_orientation, car_local_ctrl[0], car_local_ctrl[1], car_local_ctrl[2])
 
         ctrl = jnp.concatenate([ctrl_car, ctrl_arm, ctrl_gripper], axis=0)                                     
 
-        return rng, ctrl, a_arm, ball_released
+        return rng, ctrl, a_arm, a_gripper, ball_released
 
 
-    def n_step(self, mjx_model: Model, init_mjx_data: Data, ctrl: Array, a_arm: Array, b_prev: tuple[Array, Array, Array]) -> tuple[Data, tuple[Array, Array, Array]]:
+    def n_step(self, mjx_model: Model, init_mjx_data: Data, ctrl: Array, a_arm: Array, b_prev: tuple[Array, Array, Array], a_gripper) -> tuple[Data, tuple[Array, Array, Array]]:
 
         t_0 = init_mjx_data.time
         normalizing_factor = 1.0 / (self.mjx_model.opt.timestep * self.steps_per_ctrl)
@@ -262,6 +282,12 @@ class A_to_B:
                 mjx_data.qacc[self.nv_car:self.nv_car+self.nv_arm],
                 b0, b1, b2, b3
             ))
+
+            # Gripper timed release
+            grip = self.gripper_ctrl(jnp.array(1))
+            release = self.gripper_ctrl(jnp.array(-1))
+            _ctrl_gripper = jnp.where(jnp.logical_and(a_gripper >= 0, t >= a_gripper), release, grip)
+            _ctrl = ctrl.at[self.nu_car+self.nu_arm:self.nu_car+self.nu_arm+self.nu_gripper].set(_ctrl_gripper)
 
             mjx_data = mjx_step(mjx_model, mjx_data.replace(ctrl=_ctrl))
 
@@ -300,12 +326,7 @@ class A_to_B:
         # arm_outside_limits_reward = 3.5*jnp.astype(arm_outside_limits, jnp.float32, copy=False) 
         # arm_velocity_reward = 0.05*jnp.linalg.norm(qd_arm, ord=2)
 
-        # NOTE: Very quick and dirty way enforce ball release
-        a_gripper = action[-1]
-        a_gripper = jnp.where(ball_released, -1.0, a_gripper)
-        action = action.at[-1].set(a_gripper)
-
-        zeus_reward, panda_reward = self.reward_fn(observation, action, training_step)
+        zeus_reward, panda_reward = self.reward_fn(observation, action, jnp.logical_not(ball_released), training_step)
 
         reward = (zeus_reward, panda_reward)
 

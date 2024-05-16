@@ -102,14 +102,14 @@
             <geom pos="0 0 0" size="0.1 0.005" type="cylinder" rgba="0.858824 0.556863 0.117647 1.0" />
         </body>
 
-        <body name="driving_surface" pos="1.1 0 0.0">
+        <body name="driving_surface" pos="0.6 0 0.0"> <!-- NOTE: Should correspond with playing area for visualization -->
             <body name="driving_surface_top" pos="0 0 0.1">
-                <geom pos="0 0 0" size="1 1 0.01" type="box" material="black_plastic" />
+                <geom pos="0 0 0" size="0.5 1 0.01" type="box" material="black_plastic" /> 
             </body>
-            <geom pos="0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
-            <geom pos="0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
-            <geom pos="-0.96 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
-            <geom pos="-0.96 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="0.48 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="0.48 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="-0.48 0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
+            <geom pos="-0.48 -0.96 0.05" size="0.04 0.04 0.05" type="box" material="black_plastic" />
         </body>
 
         <body name="robot_stand" pos="0 0 0">

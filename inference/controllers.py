@@ -52,12 +52,10 @@ def arm_fixed_pose(decode_obs: ObsDecodeFuncSig, obs: Array, a_arm: Array, pose:
     return tau
 
 def gripper_ctrl(action: Array) -> Array:
-    def grip() -> Array:
-        return array([0.02, -0.005, 0.02, -0.005], dtype=float32)                                      
-    def release() -> Array: 
-        return array([0.04, 0.05, 0.04, 0.05], dtype=float32)                                          
+    grip = array([0.02, -0.005, 0.02, -0.005], dtype=float32)                                      
+    release = array([0.04, 0.05, 0.04, 0.05], dtype=float32)                                          
 
-    return cond(action[0] > 0.0, grip, release)
+    return where(action > 0.0, grip, release)
 
 def gripper_always_grip(action: Array) -> Array:
     return gripper_ctrl(array([1.0]))

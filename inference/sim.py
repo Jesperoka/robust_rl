@@ -1,6 +1,6 @@
 from typing import Any, Callable, NamedTuple
 from flax.linen import FrozenDict
-from jax._src.random import KeyArray
+from jax._src.random import KeyArray, ball
 from mujoco import MjModel, MjData, MjvCamera, Renderer, mj_resetData, mj_step, mj_forward, mj_name2id, mjtObj
 from functools import partial
 from numpy import ndarray, zeros 
@@ -12,6 +12,7 @@ from tensorflow_probability.substrates.jax.distributions import Distribution
 from reproducibility_globals import PRNG_SEED
 from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN 
 from environments.A_to_B_jax import A_to_B
+from cv2 import putText, LINE_AA, FONT_HERSHEY_SIMPLEX
 
 
 import pdb
@@ -21,10 +22,10 @@ import pdb
 # Used to run rollout without initializing MuJoCo renderer, which is useful for jitting before multiprocessed rollouts
 class FakeRenderer:
     def __init__(self, height, width):
-        self.width = width
-        self.height = height
+        self._width = width
+        self._height = height
     def update_scene(self, *args): pass
-    def render(self): return zeros((self.height, self.width))
+    def render(self): return zeros((self._height, self._width))
 
 # jit jax functions for CPU backend
 mod_cpu = jit(_mod, static_argnums=(1, ), backend="cpu")
@@ -107,6 +108,7 @@ def rollout(
         rnn_hidden_size: int,
         renderer: Renderer | FakeRenderer, 
         actors: MultiActorRNN, 
+        train_step: int,
         max_steps: int = 500,
         fps: float = 24.0
         ) -> list[ndarray]:
@@ -114,12 +116,14 @@ def rollout(
     frames = []
     dt = _model.opt.timestep
 
-    # Setup functions for CPU inference
+    # Jit functions for CPU inference
     jit_actor_forward_fns = tuple(jit(f, static_argnames="train", backend="cpu") for f in actor_forward_fns)
-    jit_decode_observation = jit(env.decode_observation, backend="cpu")
+    # jit_decode_observation = jit(env.decode_observation, backend="cpu")
     jit_reset_car_arm_and_gripper = jit(env.reset_car_arm_and_gripper, backend="cpu")
     jit_reset_ball_and_goal = jit(env.reset_ball_and_goal, backend="cpu")
     jit_compute_controls = jit(env.compute_controls, backend="cpu")
+    jit_arm_low_level_ctrl = jit(env.arm_low_level_ctrl, backend="cpu")
+    jit_gripper_ctrl = jit(env.gripper_ctrl, backend="cpu")
     jit_evaluate_environment = jit(env.evaluate_environment, backend="cpu")
     reset_cpu = partial(_reset_cpu, env.nq_ball, env.nv_ball, env.grip_site_id, env.arm_limits.q_start, jit_reset_car_arm_and_gripper, jit_reset_ball_and_goal, env.observe)
     get_car_orientation = partial(_get_car_orientation, env.car_orientation_index)
@@ -146,6 +150,7 @@ def rollout(
     _step = 0
 
     # Rollout
+    car_reward, arm_reward = 0.0, 0.0
     for env_step in range(max_steps):
         rng_a, *action_rngs = split_cpu(rng_a, env.num_agents+1)
         reset_rng, rng_r = split_cpu(rng_r)
@@ -180,29 +185,26 @@ def rollout(
                 is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
             ))
 
-            actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
+            # Can do policy.mode() or policy.sample() here for rollout of deterministic or stochastic policies respectively.
+            actions = tree_map(lambda policy, rng: policy.mode().squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
 
             car_orientation = get_car_orientation(data)
             rng_a, observation = env.observe(rng_a, data, p_goal) # type abuse # TODO: revert back to not passing rng
-            rng_a, data.ctrl, a_arm, ball_released = jit_compute_controls(rng_a, car_orientation, observation, environment_action, ball_released) # type abuse
-
-            a_gripper = environment_action[-1]
-            a_gripper = where_cpu(ball_released, -1.0, a_gripper)
-            environment_action = environment_action.at[-1].set(a_gripper)
+            rng_a, data.ctrl, a_arm, a_gripper, ball_released = jit_compute_controls(rng_a, car_orientation, observation, environment_action, ball_released) # type abuse
 
             # n_step() control logic
             # ----------------------------------------------------------------
-            t_0 = data.time
+            t_0 = copy_cpu(data.time)
             normalizing_factor = 1.0/(model.opt.timestep * env.steps_per_ctrl)
             b0, b1, b2 = b_prev
             b3 = a_arm
 
             for step in range(env.steps_per_ctrl):
 
+                # Spline tracking controller
                 t = (data.time - t_0)*normalizing_factor
-
-                data.ctrl[env.nu_car:env.nu_car+env.nu_arm] = env.arm_low_level_ctrl(
+                data.ctrl[env.nu_car:env.nu_car+env.nu_arm] = jit_arm_low_level_ctrl(
                     t, 
                     data.qpos[env.nq_car:env.nq_car+env.nq_arm], 
                     data.qvel[env.nv_car:env.nv_car+env.nv_arm], 
@@ -210,10 +212,24 @@ def rollout(
                     b0, b1, b2, b3
                 )
 
+                # Gripper timed release
+                grip = jit_gripper_ctrl(array_cpu(1))
+                release = jit_gripper_ctrl(array_cpu(-1))
+                _ctrl_gripper = where_cpu(a_gripper >= 0 and t >= a_gripper, release, grip)
+                data.ctrl[env.nu_car+env.nu_arm:env.nu_car+env.nu_arm+env.nu_gripper] = _ctrl_gripper
+
                 mj_step(model, data)
+                
+                # Rendering
                 if _step % (1.0/(fps*dt)) <= 9.0e-1:
                     renderer.update_scene(data, global_cam)
-                    frames.append(renderer.render())
+                    img = renderer.render()
+                    img_with_text = putText(
+                            img, 
+                            f"r_c: {car_reward: 5.2f}, r_a: {arm_reward: 5.2f}, b_r: {ball_released!s:^5}, a_g: {a_gripper: 4.2f}", 
+                            (10, renderer._height - 30), 
+                            FONT_HERSHEY_SIMPLEX, 0.69, (255, 255, 255), 2, LINE_AA)
+                    frames.append(img_with_text)
 
                 _step += 1
 
@@ -221,15 +237,13 @@ def rollout(
             # ----------------------------------------------------------------
 
             rng_a, observation = env.observe(rng_a, data, p_goal) # type abuse # TODO: revert back to not passing rng
-            observation, (car_reward, arm_reward), done, p_goal, aux = jit_evaluate_environment(observation, environment_action, 0, ball_released) # NOTE: need to pass the correct training_step here for rewards to be accurate
+            observation, (car_reward, arm_reward), done, p_goal, aux = jit_evaluate_environment(observation, environment_action, train_step, ball_released) # NOTE: need to pass the correct training_step here for rewards to be accurate
 
             environment_state = EnvironmentState(reset_rng, model, data, p_goal, b_prev, ball_released)
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
             # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = clip_cpu(1.4142136*car_reward + 1.0, -1.05, 1.05)
-            model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = ball_released*0.95 # WARNING: TEMPORARY
-
-            model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = clip_cpu(arm_reward, -1.05, 1.05)
+            # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = clip_cpu(arm_reward, -1.05, 1.05)
 
             done = array_cpu([done])
         

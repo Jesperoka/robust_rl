@@ -197,11 +197,11 @@ def rollout_generator(renderer_args, make_renderer, rollout_fn, rollout_queue, a
                 animation_queue.put((None, None))
                 return True 
 
-            elif step > latest_step: 
+            elif step > latest_step: # don't think this is necessary anymore
                 latest_step = step 
 
             print("Running rollout")
-            frames = rollout_fn(rollout_inputs)
+            frames = rollout_fn(rollout_inputs, step)
             print("Rollout finished with ", len(frames), " frames")
 
             animation_queue.put((frames, step))
@@ -268,12 +268,25 @@ def main():
     current_dir = dirname(abspath(__file__))
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
+    CHECKPOINT_FILE = "checkpoint_LATEST"
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
     mjx_model: mjx.Model = mjx.put_model(model)
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
+
+
+    from pprint import pprint
+    pprint(dir(model))
+    print("\n\n\n")
+    pprint(model.actuator_biasprm)
+    print("\n\n\n")
+    pprint(model.actuator_cranklength)
+    print("\n\n\n")
+    pprint(model.actuator_dynprm)
+    print("\n\n\n")
+    pprint(model.actuator_gainprm)
     
     num_envs = 1
 
@@ -345,7 +358,7 @@ def main():
 
     lr = 3.0e-4
     max_grad_norm = 0.5
-    rnn_hidden_size = 16
+    rnn_hidden_size = 16 
     rnn_fc_size = 64 
 
     act_sizes = tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
@@ -353,7 +366,7 @@ def main():
     actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
+    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=actors, args=args.PyTreeRestore(actors))
 
     restored_actors.train_states = tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
 
@@ -361,8 +374,8 @@ def main():
 
     with default_device(devices("cpu")[1]):
         print("Running rollout")
-        # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, max_steps=250)
-        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, max_steps=250)
+        # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, 0, max_steps=250)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 0, max_steps=100)
         print("Rollout finished with ", len(r_frames), " frames")
 
         from matplotlib.animation import FuncAnimation

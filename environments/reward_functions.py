@@ -105,7 +105,7 @@ def punish_bad_joint_velocities(qd_arm: Array):
 # ----------------------------------------------------------------------------------------------------
 def curriculum_reward(
         max_steps: int,         # partial() this
-        decode_obs: ObsDecodeFuncSig, obs: Array, act: Array, step: int,
+        decode_obs: ObsDecodeFuncSig, obs: Array, act: Array, gripping: Array, step: int,
         ) -> tuple[Array, Array]:
 
     # Decode observation for use in different reward functions
@@ -119,9 +119,6 @@ def curriculum_reward(
         dbc_0, dbc_1, dbc_2, dbc_3,
         db_target
      ) = decode_obs(obs) 
-
-    # For specific rewards based on gripper state
-    gripping = where(act[-1] > 0.0, 1.0, 0.0)
 
     # Car reward basis functions
     car_a = max_steps/(3.0 - 1.0)
@@ -180,7 +177,11 @@ def car_reward_1(dc_goal: Array, db_target: Array, q_car: Array) -> Array:
     return -dc_goal + db_target + close_enough(dc_goal) - close_enough(db_target) + punish_car_outside_limits(q_car[0], q_car[1])
 
 def car_reward_2(dc_goal: Array, db_target, q_car: Array, gripping: Array) -> Array:
-    return 10*close_enough(dc_goal) - 10*close_enough(db_target) - (1 - gripping)*inverse_plus_one(db_target) + inverse_plus_one(dc_goal) + punish_car_outside_limits(q_car[0], q_car[1])
+    return (
+            10*close_enough(dc_goal) - 10*close_enough(db_target) 
+            # - (1 - gripping)*inverse_plus_one(db_target) + inverse_plus_one(dc_goal) 
+            + punish_car_outside_limits(q_car[0], q_car[1])
+            )
 # ----------------------------------------------------------------------------------------------------
 
 
@@ -211,7 +212,11 @@ def arm_reward_3(db_target: Array, gripping: Array, qd_arm) -> Array:
         )
 
 def arm_reward_4(db_target: Array, dc_goal: Array, qd_arm: Array, gripping: Array) -> Array:
-    return 10*close_enough(db_target) - 10*close_enough(dc_goal) - inverse_plus_one(dc_goal) + (1 - gripping)*inverse_plus_one(db_target) + punish_bad_joint_velocities(qd_arm) 
+    return (
+            10*close_enough(db_target) - 10*close_enough(dc_goal) 
+            # - inverse_plus_one(dc_goal) + (1 - gripping)*inverse_plus_one(db_target) 
+            + punish_bad_joint_velocities(qd_arm) 
+            )
 # ----------------------------------------------------------------------------------------------------
 
 

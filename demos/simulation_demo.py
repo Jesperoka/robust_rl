@@ -48,6 +48,7 @@ if __name__ == "__main__":
     # pprint(body.pos)
     # pprint(body.ipos)
     # pprint(dir(body))
+    mj.mjr_text(25, "test", renderer._mjr_context, 30, 50, 1, 0, 0)
     viewer = mujoco.viewer.launch(model, data)
     exit()
 

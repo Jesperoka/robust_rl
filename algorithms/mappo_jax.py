@@ -885,6 +885,7 @@ def main():
     current_dir = dirname(abspath(__file__))
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
+    CHECKPOINT_FILE = "checkpoint_LATEST"
 
     print("\n\nINFO:\njax.local_devices():", jax.local_devices(), " jax.local_device_count():",
           jax.local_device_count(), " xla.is_optimized_build(): ", jax.lib.xla_client._xla.is_optimized_build(), # type: ignore[attr-defined]
@@ -900,14 +901,15 @@ def main():
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
-    num_envs = 4096 
+    num_envs = 2048 # 4096 
     minibatch_size = 64 
 
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
-        num_env_steps   = 3,
-        total_timesteps = 209_715_200,
+        num_env_steps   = 25, #3, # NOTE: I might want to increase rollout length for more stability in learning to wait before throwing
+        total_timesteps = 419_430_400,
+        # total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
         # total_timesteps = 20_971_520,
         # total_timesteps = 2_097_152,
@@ -959,7 +961,7 @@ def main():
     data_displayer_fn = partial(data_displayer, 900, 640, 126)
 
     with jax.default_device(jax.devices("cpu")[1]):
-         _ = rollout_fn(FakeRenderer(900, 640), actors, max_steps=2)
+         _ = rollout_fn(FakeRenderer(900, 640), actors, 0, max_steps=2)
 
     data_display_queue = Queue()
     rollout_generator_queue = Queue(1)
@@ -986,7 +988,7 @@ def main():
 
     print("\n\nsaving actors...\n")
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    checkpointer.save(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
+    checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     print("\n...actors saved.\n\n")
 
     rollout_generator_process.join()

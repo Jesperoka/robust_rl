@@ -24,7 +24,7 @@ def passthrough_last(*args: Array) -> Array:
 
 @dataclass
 class EnvironmentOptions:
-    reward_fn:      Callable[[ObsDecodeFuncSig, Array, Array, int], tuple[Array, Array]]
+    reward_fn:      Callable[[ObsDecodeFuncSig, Array, Array, Array, int], tuple[Array, Array]]
     car_ctrl:       Callable[[ObsDecodeFuncSig, Array, Array], Array] = passthrough_second
     arm_ctrl:       Callable[[ObsDecodeFuncSig, Array, Array], Array] = passthrough_second
     gripper_ctrl:   Callable[[Array], Array] = passthrough
@@ -48,7 +48,7 @@ class EnvironmentOptions:
     gripper_act_min:    Array = field(default_factory=lambda: array([-1.0], dtype=float32))
     gripper_act_max:    Array = field(default_factory=lambda: array([1.0], dtype=float32))
 
-    # Domain randomization. Noises are uniform in [-noise, noise] or [0, noise]. (+) additive, [*] multiplicative
+    # Domain randomization. Noises are uniform in [-noise, noise] (or [0, noise] if specified). (+) additive, [*] multiplicative
     timestep_noise:         float = 0.0005  # s         (+)     timestep = timestep + noise
     impratio_noise:         float = 0.01    #           (+)     impratio = impratio + noise
     tolerance_noise:        float = 5.0e-9  #           (+)     tolerance = tolerance + noise
@@ -57,7 +57,8 @@ class EnvironmentOptions:
     density_noise:          float = 0.05    # kg/m^3    (+)     density = density + noise       [0, noise]
     viscosity_noise:        float = 0.00001 # kg/m/s    (+)     viscosity = viscosity + noise   [0, noise]
     gravity_noise:          float = 0.05    # m/s^2     (+)     gravity = gravity + noise
-    actuator_gain_noise:    float = 0.01    #           (+)     actuator_gain = actuator_gain + noise
-    actuator_bias_noise:    float = 0.01    #           (+)     actuator_bias = actuator_bias + noise
+    actuator_gain_noise:    float = 0.1     # fraction  [*]     actuator_gainprm = (1 + noise)*actuator_gainprm
+    actuator_bias_noise:    float = 0.01     # fraction  [*]     actuator_biasprm = (1 + noise)*actuator_biasprm # WARNING: too large values can lead to NaNs
+    actuator_dyn_noise:     float = 0.01     # fraction  [*]     actuator_dynprm  = (1 + noise)*actuator_dynprm
     observation_noise:      float = 0.01    # fraction  [*]     obs = (1 + noise)*obs
     ctrl_noise:             float = 0.001   # fraction  [*]     act = (1 + noise)*act
