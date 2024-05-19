@@ -1,22 +1,22 @@
 import pyrealsense2 as rs
-from inference.real_2 import PoseEstimates
 import reproducibility_globals
 from pupil_apriltags import Detector
 from os.path import dirname, abspath, join
 from functools import partial
-from numpy import array as np_array, eye, zeros, float32
+from numpy import array as np_array, eye, ndarray, zeros, float32
 from cv2.typing import MatLike
 from mujoco import MjModel, mjtObj, mj_name2id # type: ignore[attr-defined]
 from mujoco.mjx import Model, put_model
 from environments.A_to_B_jax import A_to_B
 from environments.options import EnvironmentOptions
 from numba import njit
-from jax import Array, jit
+from jax import Array, ShapeDtypeStruct, device_get, devices, jit
+from jax.sharding import Mesh, PartitionSpec, NamedSharding, SingleDeviceSharding
 from jax.numpy import newaxis, array, mod, arctan2, min, abs, clip, sign, pi, concatenate
 from jax.numpy.linalg import norm
 from jax.random import split, PRNGKey
 from jax.tree_util import tree_map
-from orbax.checkpoints import Checkpointer, PyTreeCheckpointHandler, args
+from orbax.checkpoint import CheckpointManager, Checkpointer, PyTreeCheckpointHandler, PyTreeCheckpointer, RestoreArgs, args, checkpoint_utils
 from algorithms.utils import ActorInput, MultiActorRNN, initialize_actors
 from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
 from environments.reward_functions import curriculum_reward
@@ -25,6 +25,7 @@ from panda_py import Desk, Panda, PandaContext
 from panda_py.libfranka import Gripper, GripperState, RobotState
 
 
+import pdb
 
 # Setup functions
 # --------------------------------------------------------------------------------
@@ -37,6 +38,7 @@ SHOP_FLOOR_IP = "10.0.0.2"  # hostname for the workshop floor, i.e. the Franka E
 FILEPATH = abspath(join(dirname(__file__), "../", "sens.txt"))
 CTRL_FREQUENCY = 1000; assert CTRL_FREQUENCY == 1000
 MAX_RUNTIME = 30.0
+
 
 def setup_env():
     scene = join(CURRENT_DIR, "..", MODEL_DIR, MODEL_FILE)
@@ -59,7 +61,7 @@ def setup_env():
     return env
 
 
-def setup_camera() -> tuple[rs.pipline, tuple[float, float, float, float], MatLike, MatLike, MatLike, MatLike, int, int, Detector]:
+def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatLike, MatLike, MatLike, MatLike, int, int, Detector]:
     pipe = rs.pipeline()
     cfg = rs.config()
     cfg.disable_all_streams()
@@ -114,8 +116,39 @@ def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: 
     assert sequence_length == 1 and num_envs == 1
     action_rngs = tuple(split(rng))
     actors, actor_hidden_states = initialize_actors(action_rngs, num_envs, num_agents, obs_size, act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
+
+
+
+    # TODO: there seems to be an issue with loading checkpoints for custom PyTrees
+    # that contain empty nodes like optax.EmptyState(). According to commit history
+    # of orbax this should be fixed, but I'm not able to restore the full MultiActorRNN
+    # that contains an optimizer with an EmptyState.
+
+    # The best thing to do is probably to just save the params dict.
+
+    sharding = SingleDeviceSharding(
+        device=devices("cpu")[0]
+    )
+
+    def set_sharding(x):
+        if isinstance(x, Array):
+            x = ShapeDtypeStruct(x.shape, x.dtype, sharding=sharding)
+        return x
+
+    _actors = tree_map(set_sharding, actors)
+    restore_args = checkpoint_utils.construct_restore_args(_actors)
+
     checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR, checkpoint_file), state=actors, args=args.PyTreeRestore(actors))
+
+    pdb.set_trace()
+    restored_actors = checkpointer.restore(
+        # state=actors,
+        directory=join(CHECKPOINT_DIR, checkpoint_file),
+        args=args.PyTreeRestore(
+            item=actors,
+            restore_args = restore_args
+        )
+    )
 
     return restored_actors, actor_hidden_states
 
@@ -301,7 +334,10 @@ def concat_obs(
 def observe(
     env: A_to_B,  # partial()
     p_goal: Array,
-    pose_estimates: PoseEstimates,
+    car_R: Array,
+    car_t: Array,
+    floor_R: Array,
+    floor_t: Array,
     prev_q_car: Array,
     prev_qd_car: Array,
     robot_state: RobotState,
@@ -309,8 +345,6 @@ def observe(
     gripping: bool,
     dt: float
     ) -> tuple[Array, tuple[Array, ...]]:
-
-    (car_R, car_t), (floor_R, floor_t) = pose_estimates.get_data()
 
     q_car, qd_car, car_R_gf, car_t_gf = observe_car(floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
     q_arm, qd_arm, qdd_d_arm = observe_arm(robot_state)

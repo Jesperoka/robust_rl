@@ -287,10 +287,15 @@ def loop_body(
         dt,
     ) = inference_carry
 
+    car_pose, floor_pose = pose_estimates.get_data()
+
     obs, aux = observe(
         env,
         p_goal,
-        pose_estimates,
+        car_pose.R,
+        car_pose.t,
+        floor_pose.R,
+        floor_pose.t,
         prev_q_car,
         prev_qd_car,
         panda.get_state(),
