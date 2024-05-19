@@ -1,4 +1,5 @@
 import pyrealsense2 as rs
+from inference.real_2 import PoseEstimates
 import reproducibility_globals
 from pupil_apriltags import Detector
 from os.path import dirname, abspath, join
@@ -16,11 +17,12 @@ from jax.numpy.linalg import norm
 from jax.random import split, PRNGKey
 from jax.tree_util import tree_map
 from orbax.checkpoints import Checkpointer, PyTreeCheckpointHandler, args
-from algorithms.utils import ActorInput, initialize_actors
+from algorithms.utils import ActorInput, MultiActorRNN, initialize_actors
 from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
 from environments.reward_functions import curriculum_reward
 from environments.physical import ZeusDimensions
-from panda_py.libfranka import GripperState, RobotState
+from panda_py import Desk, Panda, PandaContext
+from panda_py.libfranka import Gripper, GripperState, RobotState
 
 
 
@@ -31,6 +33,10 @@ CHECKPOINT_DIR = join(CURRENT_DIR, "..", "trained_policies", "checkpoints")
 CHECKPOINT_FILE = "checkpoint_LATEST"
 MODEL_DIR = "mujoco_models"
 MODEL_FILE = "scene.xml"
+SHOP_FLOOR_IP = "10.0.0.2"  # hostname for the workshop floor, i.e. the Franka Emika Desk
+FILEPATH = abspath(join(dirname(__file__), "../", "sens.txt"))
+CTRL_FREQUENCY = 1000; assert CTRL_FREQUENCY == 1000
+MAX_RUNTIME = 30.0
 
 def setup_env():
     scene = join(CURRENT_DIR, "..", MODEL_DIR, MODEL_FILE)
@@ -53,7 +59,7 @@ def setup_env():
     return env
 
 
-def setup_camera() -> tuple[rs.pipline, tuple[float, ...], MatLike, MatLike, MatLike, MatLike, int, int, Detector]:
+def setup_camera() -> tuple[rs.pipline, tuple[float, float, float, float], MatLike, MatLike, MatLike, MatLike, int, int, Detector]:
     pipe = rs.pipeline()
     cfg = rs.config()
     cfg.disable_all_streams()
@@ -112,6 +118,37 @@ def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: 
     restored_actors = checkpointer.restore(join(CHECKPOINT_DIR, checkpoint_file), state=actors, args=args.PyTreeRestore(actors))
 
     return restored_actors, actor_hidden_states
+
+
+def setup_panda() -> tuple[Panda, PandaContext, Gripper]:
+    with open(FILEPATH, 'r') as file:
+        username = file.readline().strip()
+        password = file.readline().strip()
+
+    print("Connecting to Desk")
+    desk = Desk(SHOP_FLOOR_IP, username, password)
+
+    while not desk.has_control():
+        key = input("Another user has control\nPress any key (except q) when control has been relinquished to unlock FCI.\nOr press q to exit: ")
+        if key == "q":
+            exit(0)
+        desk.take_control()
+
+    print("Unlocking joints if locked")
+    desk.unlock()
+
+    print("Activating FCI")
+    desk.activate_fci()
+
+    print("Conneting to Panda")
+    panda = Panda(SHOP_FLOOR_IP)
+    panda_ctx = panda.create_context(frequency=CTRL_FREQUENCY, max_runtime=MAX_RUNTIME)
+    panda.move_to_start()
+
+    print("Connection to Franka Hand")
+    gripper = Gripper(SHOP_FLOOR_IP)
+
+    return panda, panda_ctx, gripper
 # --------------------------------------------------------------------------------
 
 
@@ -119,7 +156,14 @@ def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: 
 # Inference functions
 # --------------------------------------------------------------------------------
 @partial(jit, static_argnames=("num_agents", "done"))
-def policy_inference(num_agents, actors, actor_hidden_states, observation, done):
+def policy_inference(
+    num_agents: int,
+    actors: MultiActorRNN,
+    actor_hidden_states: tuple[Array, ...],
+    observation: Array,
+    done: Array
+    ) -> tuple[Array, tuple[Array, ...]]:
+
     inputs = tuple(
             ActorInput(observation[newaxis, :][newaxis, :], done[newaxis, :])
             for _ in range(num_agents)
@@ -145,8 +189,8 @@ def finite_difference(x, prev_x, dt):
 
 @partial(jit, static_argnames=("angle_offset", "max_abs_vel"))
 def observe_car(
-    ground_R: Array,
-    ground_t: Array,
+    floor_R: Array,
+    floor_t: Array,
     car_R: Array,
     car_t: Array,
     prev_q_car: Array,
@@ -157,8 +201,8 @@ def observe_car(
     ) -> tuple[Array, Array, Array, Array]:
 
     # Compute the relative pose of the car with respect to the ground frame
-    car_t_ground_frame = ground_R.T @ (car_t - ground_t)
-    car_R_ground_frame = ground_R.T @ car_R
+    car_t_ground_frame = floor_R.T @ (car_t - floor_t)
+    car_R_ground_frame = floor_R.T @ car_R
 
     x_dir = array((1.0, 0.0))
     x_dir_rotated = car_R_ground_frame[0:2, 0:2] @ x_dir # approximate rotation about z-axis
@@ -257,10 +301,7 @@ def concat_obs(
 def observe(
     env: A_to_B,  # partial()
     p_goal: Array,
-    ground_R: Array,
-    ground_t: Array,
-    car_R: Array,
-    car_t: Array,
+    pose_estimates: PoseEstimates,
     prev_q_car: Array,
     prev_qd_car: Array,
     robot_state: RobotState,
@@ -269,7 +310,9 @@ def observe(
     dt: float
     ) -> tuple[Array, tuple[Array, ...]]:
 
-    q_car, qd_car, car_R_gf, car_t_gf = observe_car(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
+    (car_R, car_t), (floor_R, floor_t) = pose_estimates.get_data()
+
+    q_car, qd_car, car_R_gf, car_t_gf = observe_car(floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
     q_arm, qd_arm, qdd_d_arm = observe_arm(robot_state)
     q_gripper, qd_gripper = observe_gripper(gripper_state, gripping)
 
