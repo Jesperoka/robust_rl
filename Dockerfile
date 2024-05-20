@@ -115,27 +115,27 @@ RUN pip install --upgrade --break-system-packages \
     distrax
 
 # Neovim for development (remove this if you're not planning on using neovim to develop on the lab computer)
-# WORKDIR /
-# RUN apt-get install -y\
-#     python3.12-venv \
-#     npm
-# RUN git clone https://github.com/neovim/neovim
-# RUN cd neovim\
-#  && make CMAKE_BUILD_TYPE=RelWithDebInfo \
-#  && make install
-#
-# WORKDIR /
-# RUN apt install ripgrep
-# RUN cd ~ \
-#  && mkdir .config \
-#  && cd .config \
-#  && git clone https://github.com/ThePrimeagen/neovimrc.git \
-#  && mv neovimrc/ nvim/ \
-#  && cd /root \
-#  && mkdir personal \
-#  && cd personal \
-#  && git clone https://github.com/ThePrimeagen/harpoon.git \
-#  && cd harpoon \
-#  && git switch harpoon2
+WORKDIR /
+RUN apt-get install -y\
+    python3.12-venv \
+    npm
+RUN git clone https://github.com/neovim/neovim
+RUN cd neovim\
+ && make CMAKE_BUILD_TYPE=RelWithDebInfo \
+ && make install
+
+WORKDIR /
+RUN apt install ripgrep
+RUN cd ~ \
+ && mkdir .config \
+ && cd .config \
+ && git clone https://github.com/ThePrimeagen/neovimrc.git \
+ && mv neovimrc/ nvim/ \
+ && cd /root \
+ && mkdir personal \
+ && cd personal \
+ && git clone https://github.com/ThePrimeagen/harpoon.git \
+ && cd harpoon \
+ && git switch harpoon2
 
 

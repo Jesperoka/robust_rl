@@ -1,4 +1,5 @@
 """Data processing functionality for policy inference."""
+from jax import Array
 import numpy as np
 # from numba  import jit as njit
 from collections import deque
@@ -12,7 +13,7 @@ class LowPassFilter:
         self.data = deque(maxlen=history_length)
         self.data.extend([np.zeros(input_shape)] * history_length)
 
-    def __call__(self, data: np.ndarray) -> np.ndarray:
+    def __call__(self, data: np.ndarray | Array) -> np.ndarray:
         self.data.append(data)
         fft_data = np.fft.rfft(np.array(self.data), axis=0)
         fft_data[self.bandlimit_index + 1:] = 0.0

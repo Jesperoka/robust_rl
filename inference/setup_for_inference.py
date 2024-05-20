@@ -1,9 +1,10 @@
 import pyrealsense2 as rs
 import reproducibility_globals
+from typing import Callable
 from pupil_apriltags import Detector
 from os.path import dirname, abspath, join
 from functools import partial
-from numpy import array as np_array, eye, ndarray, zeros, float32
+from numpy import array as np_array, eye, ndarray, zeros, float32, random
 from cv2.typing import MatLike
 from mujoco import MjModel, mjtObj, mj_name2id # type: ignore[attr-defined]
 from mujoco.mjx import Model, put_model
@@ -11,18 +12,19 @@ from environments.A_to_B_jax import A_to_B
 from environments.options import EnvironmentOptions
 from numba import njit
 from jax import Array, ShapeDtypeStruct, device_get, devices, jit
+from jax.lax import cond
 from jax.sharding import Mesh, PartitionSpec, NamedSharding, SingleDeviceSharding
 from jax.numpy import newaxis, array, mod, arctan2, min, abs, clip, sign, pi, concatenate
 from jax.numpy.linalg import norm
 from jax.random import split, PRNGKey
 from jax.tree_util import tree_map
-from orbax.checkpoint import CheckpointManager, Checkpointer, PyTreeCheckpointHandler, PyTreeCheckpointer, RestoreArgs, args, checkpoint_utils
-from algorithms.utils import ActorInput, MultiActorRNN, initialize_actors
+from orbax.checkpoint import CheckpointManager, Checkpointer, PyTreeCheckpointHandler, PyTreeCheckpointer, RestoreArgs, StandardCheckpointHandler, args, checkpoint_utils
+from algorithms.utils import ActorInput, MultiActorRNN, FakeTrainState, initialize_actors
 from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
 from environments.reward_functions import curriculum_reward
 from environments.physical import ZeusDimensions
 from panda_py import Desk, Panda, PandaContext
-from panda_py.libfranka import Gripper, GripperState, RobotState
+from panda_py.libfranka import Gripper, GripperState, RobotMode, RobotState
 
 
 import pdb
@@ -58,7 +60,7 @@ def setup_env():
 
     env = A_to_B(mjx_model, None, grip_site_id, options) # type: ignore[assignment]
 
-    return env
+    return env, jit(env.decode_observation)
 
 
 def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatLike, MatLike, MatLike, MatLike, int, int, Detector]:
@@ -73,7 +75,7 @@ def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatL
     stereo_sensor.set_option(rs.option.emitter_enabled, 0)
     stereo_sensor.set_option(rs.option.laser_power, 0)
     stereo_sensor.set_option(rs.option.enable_auto_exposure, 0)
-    stereo_sensor.set_option(rs.option.gain, 32) # default is 16
+    stereo_sensor.set_option(rs.option.gain, 16) # default is 16 (had 32 before)
     stereo_sensor.set_option(rs.option.exposure, 3300)
 
     cam_intrinsics = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile().get_intrinsics()
@@ -109,51 +111,34 @@ def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatL
 def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: str = CHECKPOINT_FILE):
     rng = PRNGKey(reproducibility_globals.PRNG_SEED)
     obs_size = env.obs_space.sample().shape[0]
-    act_sizes = (space.sample().shape[0] for space in env.act_spaces)
+    act_sizes = tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
     num_envs, num_agents, lr, max_grad_norm = 1, 2, 1e-3, 0.5
 
     sequence_length, num_envs = 1, 1
     assert sequence_length == 1 and num_envs == 1
     action_rngs = tuple(split(rng))
+
+    # Instantiate checkpointer
+    checkpointer = Checkpointer(StandardCheckpointHandler())
+
+    # Init actors and forward functions
     actors, actor_hidden_states = initialize_actors(action_rngs, num_envs, num_agents, obs_size, act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
+    apply_fns = tuple(jit(partial(ts.apply_fn, train=False), static_argnames=("train",)) for ts in actors.train_states) # type: ignore[attr-defined]
 
-
-
-    # TODO: there seems to be an issue with loading checkpoints for custom PyTrees
-    # that contain empty nodes like optax.EmptyState(). According to commit history
-    # of orbax this should be fixed, but I'm not able to restore the full MultiActorRNN
-    # that contains an optimizer with an EmptyState.
-
-    # The best thing to do is probably to just save the params dict.
-
-    sharding = SingleDeviceSharding(
-        device=devices("cpu")[0]
+    # restore state dicts
+    abstract_state = {"actor_"+str(i): device_get(ts.params) for i, ts in enumerate(actors.train_states)}
+    restored_state = checkpointer.restore(
+            join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)),
+            args=args.StandardRestore(abstract_state)
     )
+    # create actors with restored state dicts
+    restored_actors = actors
+    restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
 
-    def set_sharding(x):
-        if isinstance(x, Array):
-            x = ShapeDtypeStruct(x.shape, x.dtype, sharding=sharding)
-        return x
-
-    _actors = tree_map(set_sharding, actors)
-    restore_args = checkpoint_utils.construct_restore_args(_actors)
-
-    checkpointer = Checkpointer(PyTreeCheckpointHandler())
-
-    pdb.set_trace()
-    restored_actors = checkpointer.restore(
-        # state=actors,
-        directory=join(CHECKPOINT_DIR, checkpoint_file),
-        args=args.PyTreeRestore(
-            item=actors,
-            restore_args = restore_args
-        )
-    )
-
-    return restored_actors, actor_hidden_states
+    return restored_actors, actor_hidden_states, apply_fns
 
 
-def setup_panda() -> tuple[Panda, PandaContext, Gripper]:
+def setup_panda() -> tuple[Panda, PandaContext, Gripper, Desk]:
     with open(FILEPATH, 'r') as file:
         username = file.readline().strip()
         password = file.readline().strip()
@@ -175,26 +160,30 @@ def setup_panda() -> tuple[Panda, PandaContext, Gripper]:
 
     print("Conneting to Panda")
     panda = Panda(SHOP_FLOOR_IP)
+    panda.recover()
     panda_ctx = panda.create_context(frequency=CTRL_FREQUENCY, max_runtime=MAX_RUNTIME)
+    assert panda.get_state().robot_mode == RobotMode.kIdle, f"Cannot run while in robot_mode: {panda.get_state().robot_mode}, should be {RobotMode.kIdle}"
     panda.move_to_start()
 
     print("Connection to Franka Hand")
     gripper = Gripper(SHOP_FLOOR_IP)
+    gripper.homing()
 
-    return panda, panda_ctx, gripper
+    return panda, panda_ctx, gripper, desk
 # --------------------------------------------------------------------------------
 
 
 
 # Inference functions
 # --------------------------------------------------------------------------------
-@partial(jit, static_argnames=("num_agents", "done"))
+@partial(jit, static_argnames=("num_agents", "apply_fns"))
 def policy_inference(
     num_agents: int,
+    apply_fns: Callable,
+    done: Array,
     actors: MultiActorRNN,
     actor_hidden_states: tuple[Array, ...],
     observation: Array,
-    done: Array
     ) -> tuple[Array, tuple[Array, ...]]:
 
     inputs = tuple(
@@ -203,17 +192,25 @@ def policy_inference(
     )
 
     _, policies = zip(*tree_map(
-        lambda ts, vars, hs, inputs: ts.apply_fn({"params": ts.params, "vars": vars}, hs, inputs, train=False),
+        lambda ts, vars, hs, inputs, apply_fn: apply_fn({"params": ts.params, "vars": vars}, hs, inputs, train=False),
             actors.train_states,
             actors.vars,
             actor_hidden_states,
             inputs,
-        is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+            apply_fns,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
     ))
     actions = tree_map(lambda policy: policy.mode().squeeze(), policies, is_leaf=lambda x: not isinstance(x, tuple))
 
     return actions, actor_hidden_states
 
+# uses stateful random number generation
+def reset_goal_pos(x_min: float, x_max: float, y_min: float, y_max: float) -> Array:
+    return array([random.uniform(x_min, x_max), random.uniform(y_min, y_max)], dtype=float32)
+
+@jit
+def rotation_velocity_modifier(velocity, omega):
+    return clip(velocity - abs(omega), 0.0, velocity)
 
 @jit
 def finite_difference(x, prev_x, dt):
@@ -230,7 +227,7 @@ def observe_car(
     prev_qd_car: Array,
     dt: float,
     angle_offset: float = pi,
-    max_abs_vel:  Array = array([1.0, 1.0, 1.0])
+    max_abs_vel:  Array = array([2.0, 2.0, 2.0])
     ) -> tuple[Array, Array, Array, Array]:
 
     # Compute the relative pose of the car with respect to the ground frame
@@ -245,31 +242,40 @@ def observe_car(
     q_car = array((car_t_ground_frame[0][0], -car_t_ground_frame[1][0], theta)) # car_x == cam_z, car_y == -cam_x
 
     qd_car = (finite_difference(q_car, prev_q_car, dt) + prev_qd_car) / 2.0 # Average of previous computed velocity and positional finite differences
-    qd_car[2] = qd_car[2] if abs(qd_car[2]) <= 5.0 else -sign(qd_car[2])*min(array([abs(finite_difference(qd_car[2]-2*pi, prev_qd_car[2], dt)), abs(finite_difference(qd_car[2]+2*pi, prev_qd_car[2], dt))]))
-    qd_car = clip(qd_car, -max_abs_vel, max_abs_vel)
+
+    def discontinuity():
+        return -sign(qd_car[2]) * min(array([
+            abs(finite_difference(qd_car[2]-2*pi, prev_qd_car[2], dt)),
+            abs(finite_difference(qd_car[2]+2*pi, prev_qd_car[2], dt))
+        ]))
+
+    qd_car = clip(
+        qd_car.at[2].set(
+            cond(abs(qd_car[2]) > 5.0, discontinuity, lambda: qd_car[2]) # Angle-wrap discontinuity correction
+    ), -max_abs_vel, max_abs_vel)
 
     return q_car, qd_car, car_R_ground_frame, car_t_ground_frame
 
 
-@njit
-def observe_arm(robot_state: RobotState) -> tuple[Array, Array, Array]:
-    return array(robot_state.q, dtype=float32), array(robot_state.dq, dtype=float32), array(robot_state.ddq_d, dtype=float32)
+# @njit
+def observe_arm(robot_state: RobotState) -> tuple[Array, Array]:
+    return array(robot_state.q, dtype=float32), array(robot_state.dq, dtype=float32)
 
 
-@njit
+# @njit
 def observe_gripper(gripper_state: GripperState, gripping: bool) -> tuple[Array, Array]:
     q_gripper = 0.5*gripper_state.width
     vel = 0.0 if (gripping or gripper_state.width >= 0.075) else 0.05
     return array([q_gripper, q_gripper], dtype=float32), array([vel, vel], dtype=float32)
 
 
-@partial(jit, static_argnames=("env",))
+@partial(jit, static_argnames=("env", ))
 def observe_relative_distances(
     q_car: Array,
     p_goal: Array,
     p_ball: Array,
     env: A_to_B
-    ) -> list[Array]:
+    ) -> Array:
     # Corners of the playing area
     corner_0 = array([env.car_limits.x_min, env.car_limits.y_min, env.playing_area.floor_height], dtype=float32)
     corner_1 = array([env.car_limits.x_min, env.car_limits.y_max, env.playing_area.floor_height], dtype=float32)
@@ -300,13 +306,13 @@ def observe_relative_distances(
     # 3D Euclidean distance from ball to the car (target)
     db_target = norm(array([q_car[0], q_car[1], env.playing_area.floor_height + ZeusDimensions.target_height]) - p_ball[0:3], ord=2)[newaxis]
 
-    return [
+    return array([
         dc_goal,
         dcc_0, dcc_1, dcc_2, dcc_3,
         dgc_0, dgc_1, dgc_2, dgc_3,
         dbc_0, dbc_1, dbc_2, dbc_3,
         db_target
-    ]
+    ], dtype=float32).squeeze()
 
 
 @jit
@@ -333,13 +339,13 @@ def concat_obs(
 
 def observe(
     env: A_to_B,  # partial()
-    p_goal: Array,
-    car_R: Array,
-    car_t: Array,
-    floor_R: Array,
-    floor_t: Array,
-    prev_q_car: Array,
-    prev_qd_car: Array,
+    p_goal: ndarray,
+    car_R: ndarray,
+    car_t: ndarray,
+    floor_R: ndarray,
+    floor_t: ndarray,
+    prev_q_car: ndarray,
+    prev_qd_car: ndarray,
     robot_state: RobotState,
     gripper_state: GripperState,
     gripping: bool,
@@ -347,7 +353,7 @@ def observe(
     ) -> tuple[Array, tuple[Array, ...]]:
 
     q_car, qd_car, car_R_gf, car_t_gf = observe_car(floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
-    q_arm, qd_arm, qdd_d_arm = observe_arm(robot_state)
+    q_arm, qd_arm = observe_arm(robot_state)
     q_gripper, qd_gripper = observe_gripper(gripper_state, gripping)
 
     # TODO: ball tracking

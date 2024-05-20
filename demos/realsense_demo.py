@@ -19,7 +19,7 @@ def draw_axis(img, R, t, K):
 
 if __name__ == "__main__":
     pipe = rs.pipeline()
-    cfg = rs.config() 
+    cfg = rs.config()
     cfg.disable_all_streams()
     cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 90)
     profile = pipe.start(cfg)
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
         frame = draw_axis(image, R, t, K)
 
-        cv2.imshow("image", image)
+        cv2.imshow("Realsense Camera", image)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Exiting...")
             break
