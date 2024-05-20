@@ -1,5 +1,6 @@
 """Definitions of reward functions, coupled to the environment by 'decode_observation(obs)' (and 'decode_action(act)' in the future) function(s)."""
 from jax import Array
+from jax import debug
 from jax.numpy  import array, clip, concatenate, float32, dot, where, exp, sum as jnp_sum, squeeze
 from jax.numpy.linalg import norm
 from environments.options import ObsDecodeFuncSig
@@ -125,7 +126,7 @@ def curriculum_reward(
     car_d = 3.0
     car_s = 0.90
 
-    alpha_0 = gaussian(step, 0, car_a/car_d)
+    alpha_0 = gaussian(step, 0.0*car_a, car_a/car_d)
     alpha_1 = gaussian(step, 1.0*car_a, car_a/car_d)
     alpha_2 = gaussian(step, 2.0*car_a, car_a/(car_d - car_s))
 
@@ -145,7 +146,7 @@ def curriculum_reward(
     arm_d = 5.0
     arm_s = 0.90
 
-    beta_0 = gaussian(step, 0, arm_a/arm_d)
+    beta_0 = gaussian(step, 0.0*arm_a, arm_a/arm_d)
     beta_1 = gaussian(step, 1.0*arm_a, arm_a/arm_d)
     beta_2 = gaussian(step, 2.0*arm_a, arm_a/(arm_d - arm_s))
     beta_3 = gaussian(step, 3.0*arm_a, arm_a/(arm_d - 3.0*arm_s))
@@ -157,9 +158,9 @@ def curriculum_reward(
     
     # Arm reward    
     panda_reward = (
-            beta_0*arm_reward_0(qd_arm) 
+            beta_0*arm_reward_0(qd_arm, db_target, gripping) 
             + beta_1*arm_reward_1(qd_arm, gripping, db_target)
-            + beta_2*arm_reward_2(db_target, gripping)
+            + beta_2*arm_reward_2(qd_arm, db_target, gripping)
             + beta_3*arm_reward_3(db_target, gripping, qd_arm)
             + beta_4*arm_reward_4(db_target, dc_goal, qd_arm, gripping)
     )
@@ -171,10 +172,10 @@ def curriculum_reward(
 # Car scheduled rewards
 # ----------------------------------------------------------------------------------------------------
 def car_reward_0(dc_goal: Array, q_car: Array) -> Array:
-    return -dc_goal + close_enough(dc_goal) + punish_car_outside_limits(q_car[0], q_car[1])
+    return -dc_goal + close_enough(dc_goal) + punish_car_outside_limits(q_car[0], q_car[1]) - 1.0
 
 def car_reward_1(dc_goal: Array, db_target: Array, q_car: Array) -> Array:
-    return -dc_goal + db_target + close_enough(dc_goal) - close_enough(db_target) + punish_car_outside_limits(q_car[0], q_car[1])
+    return -dc_goal + db_target + close_enough(dc_goal) - close_enough(db_target) + punish_car_outside_limits(q_car[0], q_car[1]) - 1.0
 
 def car_reward_2(dc_goal: Array, db_target, q_car: Array, gripping: Array) -> Array:
     return (
@@ -187,17 +188,32 @@ def car_reward_2(dc_goal: Array, db_target, q_car: Array, gripping: Array) -> Ar
 
 # Arm scheduled rewards
 # ----------------------------------------------------------------------------------------------------
-def arm_reward_0(qd_arm: Array) -> Array:
-    return inverse_plus_one(qd_arm)
+def arm_reward_0(qd_arm: Array, db_target: Array, gripping: Array) -> Array:
+    return (
+            (1 - gripping)*inverse_plus_one(db_target)
+            + inverse_plus_one(qd_arm) 
+            )
 
 def arm_reward_1(qd_arm: Array, gripping: Array, db_target) -> Array:
     return (
-            good_joint_velocities(qd_arm)*gripping + 
-            (1 - gripping)*(inverse_plus_one(qd_arm) + inverse_plus_one(db_target) + plateau_03(db_target))
+            # good_joint_velocities(qd_arm)*gripping + 
+            (1 - gripping)*(
+                inverse_plus_one(db_target) 
+                + plateau_03(db_target)
+            )
+            + inverse_plus_one(qd_arm)
         )
 
-def arm_reward_2(db_target: Array, gripping: Array) -> Array:
-    return (1 - gripping)*(inverse_plus_one(db_target) + plateau_03(db_target) + plateau_01(db_target))
+def arm_reward_2(qd_arm: Array, db_target: Array, gripping: Array) -> Array:
+    return (
+            (1 - gripping)*(
+                inverse_plus_one(db_target) 
+                + plateau_03(db_target) 
+                + plateau_01(db_target)
+                - 0.025*db_target
+            )
+            + inverse_plus_one(qd_arm)
+        )
 
 def arm_reward_3(db_target: Array, gripping: Array, qd_arm) -> Array:
     return (
@@ -206,7 +222,8 @@ def arm_reward_3(db_target: Array, gripping: Array, qd_arm) -> Array:
                 + plateau_03(db_target) 
                 + plateau_01(db_target) 
                 + plateau_005(db_target) 
-                + inverse_plus_one(qd_arm)
+                - 0.025*db_target
+                # + inverse_plus_one(qd_arm)
             ) 
             + punish_bad_joint_velocities(qd_arm)
         )
@@ -313,7 +330,7 @@ def main():
     car_d = 3.0
     car_s = 0.90
 
-    car_y1 = gaussian(x, 0, car_a/car_d)
+    car_y1 = gaussian(x, 0.0*car_a, car_a/car_d)
     car_y2 = gaussian(x, 1.0*car_a, car_a/car_d)
     car_y3 = gaussian(x, 2.0*car_a, car_a/(car_d - car_s))
 
@@ -332,8 +349,8 @@ def main():
     arm_d = 5.0
     arm_s = 0.90
 
-    arm_y1 = gaussian(x, 0, arm_a/arm_d)     
-    arm_y2 = gaussian(x, arm_a, arm_a/arm_d)
+    arm_y1 = gaussian(x, 0.0*arm_a, arm_a/arm_d)     
+    arm_y2 = gaussian(x, 1.0*arm_a, arm_a/arm_d)
     arm_y3 = gaussian(x, 2.0*arm_a, arm_a/(arm_d - arm_s))
     arm_y4 = gaussian(x, 3.0*arm_a, arm_a/(arm_d - 3.0*arm_s))
     arm_y5 = gaussian(x, 4.0*arm_a, arm_a/(arm_d - 4.0*arm_s))

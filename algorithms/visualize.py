@@ -8,6 +8,7 @@ from functools import partial
 from time import sleep
 from sys import exit
 
+
 if __name__ == "__main__":
     from os import environ
     environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=3 "
@@ -257,8 +258,8 @@ def main():
     from inference.sim import rollout, FakeRenderer
     from inference.controllers import arm_fixed_pose, gripper_always_grip, arm_spline_tracking_controller, gripper_ctrl 
     from algorithms.utils import initialize_actors, FakeTrainState
-    from jax import tree_map
-    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
+    from jax import tree_map, device_get
+    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
     import jax.numpy as jnp
 
 
@@ -269,33 +270,23 @@ def main():
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
     CHECKPOINT_FILE = "checkpoint_LATEST"
+    # CHECKPOINT_FILE = "zeus_rnn_32"
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
     mjx_model: mjx.Model = mjx.put_model(model)
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
-
-
-    from pprint import pprint
-    pprint(dir(model))
-    print("\n\n\n")
-    pprint(model.actuator_biasprm)
-    print("\n\n\n")
-    pprint(model.actuator_cranklength)
-    print("\n\n\n")
-    pprint(model.actuator_dynprm)
-    print("\n\n\n")
-    pprint(model.actuator_gainprm)
     
     num_envs = 1
 
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = partial(curriculum_reward, 20_000_000),
         # car_ctrl       = car_fixed_pose,
-        # arm_ctrl       = ,
+        # arm_ctrl       = arm_fixed_pose,
         arm_low_level_ctrl = arm_spline_tracking_controller,
         gripper_ctrl   = gripper_ctrl,
+        # gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.05,
         steps_per_ctrl = 20,
     )
@@ -361,21 +352,32 @@ def main():
     rnn_hidden_size = 16 
     rnn_fc_size = 64 
 
+
+    # Instantiate checkpointer
+    checkpointer = Checkpointer(StandardCheckpointHandler())
+
+    # Init actors and forward functions
     act_sizes = tree_map(lambda space: space.sample().shape[0], env.act_spaces, is_leaf=lambda x: not isinstance(x, tuple))
     actors, _ = initialize_actors((rng, rng), num_envs, env.num_agents, env.obs_space.sample().shape[0], act_sizes, lr, max_grad_norm, rnn_hidden_size, rnn_fc_size)
     actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
-    checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=actors, args=args.PyTreeRestore(actors))
+    # restore state dicts
+    abstract_state = {"actor_"+str(i): device_get(ts.params) for i, ts in enumerate(actors.train_states)}
+    restored_state = checkpointer.restore(
+            join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)), 
+            args=args.StandardRestore(abstract_state)
+    )
+    # create actors with restored state dicts
+    restored_actors = actors
+    restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
 
-    restored_actors.train_states = tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
 
     _rollout_fn = partial(rollout, env, model, data, actor_forward_fns, rnn_hidden_size)
 
     with default_device(devices("cpu")[1]):
         print("Running rollout")
         # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, 0, max_steps=250)
-        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 0, max_steps=100)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 20_000_000, max_steps=100)
         print("Rollout finished with ", len(r_frames), " frames")
 
         from matplotlib.animation import FuncAnimation

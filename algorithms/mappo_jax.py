@@ -871,7 +871,7 @@ def main():
     from environments.options import EnvironmentOptions
     from environments.physical import ZeusLimits, PandaLimits
     from environments.reward_functions import car_only_negative_distance, curriculum_reward 
-    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
+    from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
     from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
@@ -907,13 +907,14 @@ def main():
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
-        num_env_steps   = 25, #3, # NOTE: I might want to increase rollout length for more stability in learning to wait before throwing
-        total_timesteps = 419_430_400,
+        num_env_steps   = 5, # NOTE: I might want to increase rollout length for more stability in learning to wait before throwing
+        # total_timesteps = 419_430_400,
         # total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
-        # total_timesteps = 20_971_520,
+        total_timesteps = 20_971_520,
         # total_timesteps = 2_097_152,
-        update_epochs   = 5,
+        # total_timesteps = 2_097_152 // 16,
+        update_epochs   = 6,
         num_minibatches = num_envs // minibatch_size,
         gamma           = 0.99,
         gae_lambda      = 0.90,
@@ -987,8 +988,11 @@ def main():
 
 
     print("\n\nsaving actors...\n")
-    checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
+    # checkpointer = Checkpointer(PyTreeCheckpointHandler())
+    # checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
+    checkpointer = Checkpointer(StandardCheckpointHandler())
+    state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(env_final.actors.train_states)}
+    checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), args=args.StandardSave(state))
     print("\n...actors saved.\n\n")
 
     rollout_generator_process.join()
@@ -1005,13 +1009,21 @@ def main():
     rngs = tuple(jax.random.split(rng))
 
     actors, actor_hidden_states = initialize_actors(rngs, num_envs, env.num_agents, obs_size, act_sizes, config.lr, config.max_grad_norm, config.rnn_hidden_size, config.rnn_fc_size)
+    actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
     print("\nrestoring actors...\n")
-    restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
+    # restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
+    abstract_state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(actors.train_states)}
+    restored_state = checkpointer.restore(
+            join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), 
+            args=args.StandardRestore(abstract_state)
+    )
+    restored_actors = actors
+    restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_actors.train_states[0].params))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[1].params, restored_actors.train_states[1].params))
-    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[0], restored_actors.vars[0]))
-    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[1], restored_actors.vars[1]))
+    # assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[0], restored_actors.vars[0]))
+    # assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[1], restored_actors.vars[1]))
     print("\n..actors restored.\n\n")
 
     inputs = tuple(
@@ -1020,12 +1032,13 @@ def main():
     )
     
     _, policies = zip(*jax.tree_map(
-        lambda ts, vars, hs, inputs: ts.apply_fn({"params": ts.params, "vars": vars}, hs, inputs, train=False),
+        lambda ts, vars, hs, inputs, apply_fn: apply_fn({"params": ts.params, "vars": vars}, hs, inputs, train=False),
             restored_actors.train_states,
             restored_actors.vars,
             actor_hidden_states,
             inputs,
-        is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
+            actor_forward_fns,
+            is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, ActorInput)
     ))
 
     actions = jax.tree_map(lambda policy: policy.sample(seed=rng), policies, is_leaf=lambda x: not isinstance(x, tuple))
