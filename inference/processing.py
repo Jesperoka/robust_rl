@@ -31,7 +31,7 @@ if __name__ == "__main__":
     signal_1[500:] = signal_1[500:] + 6.28
     signal_2 = 5*np.sin(0.3 * np.pi * 5 * t) + 0.5*np.sin(3 * np.pi * 10 * t) + -5*np.sin(2 * np.pi * 20 * t)
     signal = np.concatenate((signal_1[:, np.newaxis], signal_2[:, np.newaxis]), axis=1)
-    
+
     noise = np.random.normal([0, 0], [0.5, 0.5], (1000, 2))
     noisy_signal = signal + noise
 

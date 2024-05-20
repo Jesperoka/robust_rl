@@ -15,15 +15,15 @@ from mujoco import MjModel, mj_name2id, mjtObj
 from mujoco.mjx import Model, put_model
 from os.path import join, dirname, abspath
 from time import clock_gettime_ns, CLOCK_REALTIME, CLOCK_MONOTONIC
-from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args 
+from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args
 from algorithms.utils import initialize_actors, ActorInput
-from inference.controllers import arm_fixed_pose, gripper_always_grip 
+from inference.controllers import arm_fixed_pose, gripper_always_grip
 from inference.processing import LowPassFilter
-from environments.reward_functions import car_only_negative_distance 
+from environments.reward_functions import car_only_negative_distance
 from environments.options import EnvironmentOptions
 from environments.physical import PlayingArea, PandaLimits, ZeusLimits
 from environments.A_to_B_jax import A_to_B
-from numba import jit as njit 
+from numba import jit as njit
 
 
 from pprint import pprint
@@ -68,7 +68,6 @@ def setup_env():
     return env
 
 
-
 def load_policies(rng, obs_size, act_sizes, num_envs, num_agents, rnn_hidden_size, rnn_fc_size, lr, max_grad_norm):
     sequence_length, num_envs = 1, 1
     assert sequence_length == 1 and num_envs == 1
@@ -78,7 +77,7 @@ def load_policies(rng, obs_size, act_sizes, num_envs, num_agents, rnn_hidden_siz
     restored_actors = checkpointer.restore(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=actors, args=args.PyTreeRestore(actors))
 
     return restored_actors, actor_hidden_states
-    
+
 
 def policy_inference(num_agents, actors, actor_hidden_states, observation, done):
     inputs = tuple(
@@ -101,7 +100,7 @@ def policy_inference(num_agents, actors, actor_hidden_states, observation, done)
 
 def setup_camera():
     pipe = rs.pipeline()
-    cfg = rs.config() 
+    cfg = rs.config()
     cfg.disable_all_streams()
     cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 90)
     profile = pipe.start(cfg)
@@ -139,7 +138,7 @@ def finite_difference(x, prev_x, dt):
 @njit
 def observe_car(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt):
     # Reference frames of ground are pre-detected and known
-    
+
     # Compute the relative pose of the car with respect to the ground frame
     car_t_ground_frame = ground_R.T @ (car_t - ground_t)
     car_R_ground_frame = ground_R.T @ car_R
@@ -166,12 +165,12 @@ Q_START = np.array(device_get(PandaLimits().q_start))
 
 # @njit
 def observe(
-        ground_R, 
-        ground_t, 
-        car_R, 
-        car_t, 
-        prev_q_car, 
-        prev_qd_car, 
+        ground_R,
+        ground_t,
+        car_R,
+        car_t,
+        prev_q_car,
+        prev_qd_car,
         dt
         ):
 
@@ -187,7 +186,7 @@ def observe(
 
     p_goal = np.array([1.4428220, -0.6173251])
     dc_goal = np.array([np.linalg.norm(p_goal[0:2] - q_car[0:2], ord=2)])
-     
+
     obs = np.concatenate((
         q_car, q_arm, q_gripper, p_ball, qd_car, qd_arm, qd_gripper, pd_ball, p_goal, dc_goal, #dcc_0, dcc_1, dcc_2, dcc_3, dgc_0, dgc_1, dgc_2, dgc_3
     ), axis=0)
@@ -196,7 +195,7 @@ def observe(
 
 # Zeus Modes
 STANDBY = 0
-ACT = 1 
+ACT = 1
 CONTINUE = 2 # don't need to send
 
 async def websocket_client(queue, uri="ws://192.168.4.1:8765"): # ESP32-CAM IP address when it creates an Access Point
@@ -249,8 +248,8 @@ def main():
     act_sizes = (space.sample().shape[0] for space in env.act_spaces)
     num_envs = 1
     num_agents = 2
-    rnn_hidden_size = 16 
-    rnn_fc_size = 64 
+    rnn_hidden_size = 16
+    rnn_fc_size = 64
     lr = 1e-3
     max_grad_norm = 0.5
 
@@ -271,25 +270,25 @@ def main():
     car_command_queue = asyncio.Queue()
     print("Running Zeus websocket client ...")
 
-    
+
     lowpass_obs = LowPassFilter(input_shape=(obs_size, ), history_length=10, bandlimit_hz=0.75, sample_rate_hz=1.0/(ctrl_time + EPSILON))
 
     dt = ctrl_time
 
     async def loop_body():
-        nonlocal pipe, car_R, car_t, ground_R, ground_t, prev_q_car, prev_qd_car, actor_hidden_states, frame, dt 
+        nonlocal pipe, car_R, car_t, ground_R, ground_t, prev_q_car, prev_qd_car, actor_hidden_states, frame, dt
 
         print("Running april-tag detection...\nPress 'q' to exit")
         done = False
         while not done:
             start_ns = clock_gettime_ns(CLOCK_MONOTONIC)
-            observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt) 
+            observation, aux = observe(ground_R, ground_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
             observation = lowpass_obs(observation)
 
             (
-                q_car, q_arm, q_gripper, p_ball, 
-                qd_car, qd_arm, qd_gripper, pd_ball, 
-                p_goal, 
+                q_car, q_arm, q_gripper, p_ball,
+                qd_car, qd_arm, qd_gripper, pd_ball,
+                p_goal,
                 dc_goal,
                 dcc_0, dcc_1, dcc_2, dcc_3,
                 dgc_0, dgc_1, dgc_2, dgc_3,
@@ -300,7 +299,7 @@ def main():
             if dc_goal <= 0.1:
                 print("Goal Reached...")
                 car_command_queue.put_nowait(None)
-                done = True 
+                done = True
                 return None
 
             prev_q_car = q_car
@@ -329,7 +328,7 @@ def main():
 
             # NOTE: do I need to scale the velocity/magnitude based on angle? or is it better to just let the hardware do whatever it can?
             # action = env.
-            
+
             car_command = {"A": round(float(action[0]), 4), "B": round(float(action[1]), 4), "C": round(float(action[2]), 4), "D": ACT}
             print(car_command)
             # car_command = {"A": round(float(action[0]), 3), "B": round(float(action[1]), 3), "C": round(float(0.0), 3), "D": ACT}
@@ -364,7 +363,7 @@ def main():
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("Exiting...")
                     car_command_queue.put_nowait(None)
-                    done = True 
+                    done = True
 
             dt = (clock_gettime_ns(CLOCK_MONOTONIC) - start_ns) * 1e-9
 
