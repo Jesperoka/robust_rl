@@ -179,7 +179,7 @@ def websocket_client(
             if m := msg.read():
                 for _ in range(num_act_cmds):
                     socket.send(dumps(m))
-            msg_event.clear()
+                msg_event.clear()
 
         for _ in range(num_stop_cmds):
             socket.send(dumps(ZeusMessage().msg))
@@ -289,18 +289,18 @@ def start_inner_loop_threads(
         ):
 
         while not exit_event.is_set() and not reset_event.is_set():
-            # result = detection_event.wait(timeout=0.5)
-            # if not result: continue
-            #
-            # data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
-            # if not got_frame: continue
-            #
-            # pose_estimates.update_data(data)
-            # vis.update_data(data, frame)
-            # vis_event.set()
-            #
-            # detection_event.clear()
-            sleep(0.1)
+            result = detection_event.wait(timeout=0.5)
+            if not result: continue
+
+            data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
+            if not got_frame: continue
+
+            pose_estimates.update_data(data)
+            vis.update_data(data, frame)
+            vis_event.set()
+
+            detection_event.clear()
+            # sleep(0.1)
 
     def panda_ctrl(
         panda: Panda,
@@ -405,6 +405,8 @@ def start_viz_daemon_threads(
 # WARNING: UNFINISHED
 def loop_body(
     pipe: pipeline,
+    cam_params: tuple[float, float, float, float],
+    detector: Detector,
     env: A_to_B,
     decode_obs: Callable,
     apply_fns: tuple[Callable, ...],
@@ -488,7 +490,7 @@ def loop_body(
     ball_released = True if a_gripper >= 0.0 else ball_released
 
     velocity = rotation_velocity_modifier(magnitude, rot_vel)
-    msg.write(velocity, angle, rot_vel, ZeusMode.ACT)
+    msg.write(float(velocity), float(angle), float(rot_vel), ZeusMode.ACT)
     msg_event.set()
 
     # TOOD: ctrl_data.update_release_timing(a_gripper)
@@ -498,22 +500,22 @@ def loop_body(
     # Inner loop
     start_ns = clock_gettime_ns(CLOCK_BOOTTIME)
     while clock_gettime_ns(CLOCK_BOOTTIME) - start_ns < ctrl_time_ns:
-        detection_event.set()
         if a_gripper >= 0.0 and not ball_released and (clock_gettime_ns(CLOCK_BOOTTIME) - start_ns)/1e9 >= a_gripper:
             gripper_event.set()
 
-    # NOTE: trying outside loop
-    frame = pipe.wait_for_frames().get_infrared_frame()
-    # data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
-    if frame:
-        image = np.asarray(frame.data, dtype=np.uint8)
-        vis.update_data([None, None], image)
+    # detection_event.set()
+
+    # frame = pipe.wait_for_frames().get_infrared_frame()
+    data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
+    if got_frame:
+        pose_estimates.update_data(data)
+        vis.update_data(data, frame)
+        vis.draw_axes()
 
     vis.imshow()
     if cv2.waitKey(1) & 0xFF == ord('q'):
         exit_event.set()
         return (None, None, None, None, None, None, None, None), True, True
-
 
     return (
         actors,
@@ -546,19 +548,11 @@ def main() -> None:
     reset_event = threading.Event()
     exit_event = threading.Event()
 
-    frame = None
-    while True:
-        frame = pipe.wait_for_frames().get_infrared_frame()
-        if not frame: continue
-        image = np.asarray(frame.data, dtype=np.uint8)
-        vis.update_data([None, None], image)
-        vis.imshow()
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
     _loop_body = partial(
         loop_body,
         pipe,
+        cam_params,
+        detector,
         env,
         decode_obs,
         apply_fns,
@@ -588,7 +582,7 @@ def main() -> None:
     print("Starting inference...")
     count = 1
     all_rollouts_done = False
-    while not all_rollouts_done:
+    while not all_rollouts_done: # TODO: exit_event.is_set()
         print("Resetting before rollout...")
         reset_event.clear()
 
@@ -605,7 +599,7 @@ def main() -> None:
             pose_estimates
         )
 
-        # Need to warm up before starting inner loop threads
+        # Need to do a warm up run before starting inner loop threads
         if count > 1:
 
             detection_thread, panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread = start_inner_loop_threads(
@@ -679,7 +673,7 @@ def main() -> None:
         detection_event.clear()
         gripper_event.clear()
         reset_event.clear()
-        exit_event.clear()
+        exit_event.clear() # TODO: shouldn't clear exit
 
     exit_event.set()
     pipe.stop()
