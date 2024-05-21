@@ -225,25 +225,23 @@ def apriltag_detection(
 
 def _ctrl_callback(
     ctrl_data: ControllerData, controller: Callable,
-    robot_state: RobotState, duration: Duration
+    robot_state: RobotState, dt: float
     ) -> Torques:
 
-    dt = duration.to_sec()
+    b0, b1, b2, b3, t = ctrl_data.read()
+    ctrl_data.update_time(dt) # TODO: remove mutexes
 
-    # b0, b1, b2, b3, t = ctrl_data.read()
-    # ctrl_data.update_time(dt)
-    #
-    # tau = controller(
-    #     dt=dt,
-    #     t=t,
-    #     q=np.array(robot_state.q),
-    #     dq=np.array(robot_state.dq),
-    #     ddq=np.array(robot_state.ddq_d),
-    #     b0=b0,
-    #     b1=b1,
-    #     b2=b2,
-    #     b3=b3
-    # )
+    tau = controller(
+        dt=dt,
+        t=t,
+        q=np.array(robot_state.q),
+        dq=np.array(robot_state.dq),
+        ddq=np.array(robot_state.ddq_d),
+        b0=b0,
+        b1=b1,
+        b2=b2,
+        b3=b3
+    )
 
     q_ref = np.array(PandaLimits().q_start)
 
@@ -270,37 +268,10 @@ def start_inner_loop_threads(
     pose_estimates: PoseEstimates,
     vis: Visualization,
     vis_event: threading.Event,
-    detection_event: threading.Event,
     gripper_event: threading.Event,
     reset_event: threading.Event,
     exit_event: threading.Event
-    ) -> tuple[threading.Thread, multiprocessing.Process, threading.Thread, threading.Thread]:
-
-    def tag_detection(
-        pose_estimates: PoseEstimates,
-        pipe: pipeline,
-        cam_params: tuple[float, float, float, float],
-        detector: Detector,
-        vis: Visualization,
-        vis_event: threading.Event,
-        detection_event: threading.Event,
-        reset_event: threading.Event,
-        exit_event: threading.Event,
-        ):
-
-        while not exit_event.is_set() and not reset_event.is_set():
-            result = detection_event.wait(timeout=0.5)
-            if not result: continue
-
-            data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
-            if not got_frame: continue
-
-            pose_estimates.update_data(data)
-            vis.update_data(data, frame)
-            vis_event.set()
-
-            detection_event.clear()
-            # sleep(0.1)
+    ) -> tuple[multiprocessing.Process, threading.Thread, threading.Thread]:
 
     def panda_ctrl(
         panda: Panda,
@@ -312,22 +283,20 @@ def start_inner_loop_threads(
         panda_ctrl_callback = partial(_ctrl_callback, ctrl_data, controller)
         panda.move_to_start()
         ctrl = controllers.AppliedTorque()
-        # res = set_current_thread_to_highest_scheduler_priority("test")
-        # print("Priority set to:", res)
+        res = set_current_thread_to_highest_scheduler_priority("couldn't set priority")
         panda.start_controller(ctrl)
 
         with ctx:
-            # robot.control(panda_ctrl_callback)
-            while ctx.ok():
-                if not exit_event.is_set() and not reset_event.is_set():
-                    # print(exit_event.is_set(), reset_event.is_set(), ctx.ok())
-                    ctrl.set_control(panda_ctrl_callback(panda.get_state(), Duration(1)))
+            while ctx.ok() and not exit_event.is_set() and not reset_event.is_set():
+                # dt =
+                state = panda.get_state()
+                tau = _ctrl_callback(ctrl_data, controller, state, 0.001)
+                tau = panda_ctrl_callback(state, Duration(1))
+                ctrl.set_control(tau)
 
-            panda.stop_controller()
         panda.stop_controller()
         panda.move_to_start()
         print("Stopped Panda controller...")
-
 
 
     def gripper_state_reader(
@@ -357,50 +326,37 @@ def start_inner_loop_threads(
         print("Stopped Gripper controller...")
 
     # TODO: rename once I found out which are best as processes/threads
-    detection_thread = multiprocessing.Process(target=tag_detection, args=(pose_estimates, pipe, cam_params, detector, vis, vis_event, detection_event, reset_event, exit_event))
     panda_ctrl_process = multiprocessing.Process(target=panda_ctrl, args=(panda, ctrl_data, exit_event, reset_event))
     gripper_ctrl_thread = threading.Thread(target=gripper_ctrl, args=(gripper, exit_event, reset_event))
     gripper_state_reader_thread = threading.Thread(target=gripper_state_reader, args=(gripper, gripper_state))
 
-    detection_thread.start()
     gripper_ctrl_thread.start()
     panda_ctrl_process.start()
     gripper_state_reader_thread.start()
 
-    return detection_thread, panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread
+    return panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread
 
 
-def start_viz_daemon_threads(
-        vis: Visualization,
-        vis_event: threading.Event,
-        exit_event: threading.Event
+def pick_up_ball(
+    gripper: Gripper,
+    panda: Panda,
+    pre_pick_up_joints: np.ndarray = np.array([2.443083308018442, 0.7390330600388322, -0.12036630424252516, -2.0156737524990036, 0.1133777970969677, 2.6755371474425, 1.4384864832311868]),
+    pick_up_joints: np.ndarray = np.array([2.3437016375420385, 0.8570955322834483, -0.033515140057655705, -1.9930821339289344, 0.124799286352258, 2.8073062164783473, 1.3742789834092062])
     ) -> None:
 
-    def show(
-        vis: Visualization,
-        exit_event: threading.Event
-        ):
-        while True:
-            vis.imshow()
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                exit_event.set()
-                return
-            sleep(0.1)
+    # panda.move_to_start()
+    gripper.move(width=0.08, speed=0.05)
+    panda.move_to_joint_position(pre_pick_up_joints)
+    panda.move_to_joint_position(pick_up_joints, speed_factor=0.01)
 
-    def update(
-        vis: Visualization,
-        vis_event: threading.Event
-        ):
-        while True:
-            vis_event.wait()
-            vis.draw_axes()
-            vis_event.clear()
+    grasped = False
+    while not grasped:
+        grasped = gripper.grasp(width=0.045, speed=0.01, force=140, epsilon_inner=0.005, epsilon_outer=0.005)
+    print("Grasped:", grasped)
 
-    show_thread = threading.Thread(target=show, args=(vis, exit_event), daemon=True)
-    update_thread = multiprocessing.Process(target=update, args=(vis, vis_event), daemon=True)
+    panda.move_to_joint_position(pre_pick_up_joints, speed_factor=0.005)
+    panda.move_to_start()
 
-    show_thread.start()
-    update_thread.start()
 
 # WARNING: UNFINISHED
 def loop_body(
@@ -418,7 +374,6 @@ def loop_body(
     msg_event: threading.Event,
     exit_event: threading.Event,
     vis_event: threading.Event,
-    detection_event: threading.Event,
     gripper_event: threading.Event,
     ctrl_data: ControllerData,
     pose_estimates: PoseEstimates,
@@ -471,7 +426,8 @@ def loop_body(
      ) = decode_obs(obs)
 
     done = logical_or(dc_goal <= car_goal_radius, db_target <= ball_goal_radius)
-    done = logical_and(done, np.array(False))
+    # done = logical_and(done, np.array(False))
+    print(q_car, dc_goal, db_target)
 
     actions, actor_hidden_states = policy_inference(
         num_agents,
@@ -484,6 +440,11 @@ def loop_body(
     a_car, a_arm = actions
     magnitude, angle, rot_vel = a_car
     b_new, a_gripper = a_arm[0:7], a_arm[7]
+
+    # WARNING: temporary
+    magnitude = 0.0
+    angle = np.mod(-np.pi/2.0, 2*np.pi)
+    rot_vel = -1.0
 
     # Force only releasing once
     a_gripper = 0.0 if ball_released else a_gripper
@@ -503,17 +464,15 @@ def loop_body(
         if a_gripper >= 0.0 and not ball_released and (clock_gettime_ns(CLOCK_BOOTTIME) - start_ns)/1e9 >= a_gripper:
             gripper_event.set()
 
-    # detection_event.set()
-
     # frame = pipe.wait_for_frames().get_infrared_frame()
     data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
     if got_frame:
         pose_estimates.update_data(data)
         vis.update_data(data, frame)
-        vis.draw_axes()
 
+    vis.draw_axes()
     vis.imshow()
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(4) & 0xFF == ord('q'):
         exit_event.set()
         return (None, None, None, None, None, None, None, None), True, True
 
@@ -543,7 +502,6 @@ def main() -> None:
     vis = Visualization(width, height, K, dist_coeffs)
     msg_event = threading.Event()
     vis_event = threading.Event()
-    detection_event = threading.Event()
     gripper_event = threading.Event()
     reset_event = threading.Event()
     exit_event = threading.Event()
@@ -564,20 +522,18 @@ def main() -> None:
         msg_event,
         exit_event,
         vis_event,
-        detection_event,
         gripper_event,
     )
 
     _ = ControllerData()
     __ = panda.get_state()
     b0, b1, b2, b3, t = _.read()
-    controller = jit(partial(arm_spline_tracking_controller, vel_margin=0.05)).lower(
-        dt=0.001, t=t, q=np.array(__.q), qd=np.array(__.dq), qdd=np.array(__.ddq_d), b0=b0, b1=b1, b2=b2, b3=b3
+    controller = jit(partial(arm_spline_tracking_controller, vel_margin=0.05), static_argnames=("vel_margin", )).lower(
+        dt=0.001, vel_margin=0.05, t=t, q=np.array(__.q), qd=np.array(__.dq), qdd=np.array(__.ddq_d), b0=b0, b1=b1, b2=b2, b3=b3
     ).compile()
 
     websocket_client_thread = threading.Thread(target=websocket_client, args=(msg, msg_event, exit_event))
     websocket_client_thread.start()
-    # start_viz_daemon_threads(vis, vis_event, exit_event)
 
     print("Starting inference...")
     count = 1
@@ -585,10 +541,6 @@ def main() -> None:
     while not all_rollouts_done: # TODO: exit_event.is_set()
         print("Resetting before rollout...")
         reset_event.clear()
-
-        gripper.move(width=0.08, speed=0.05)
-        gripper.move(width=0.02, speed=0.05)
-        panda.move_to_start()
 
         ctrl_data = ControllerData()
         pose_estimates = PoseEstimates()
@@ -601,8 +553,9 @@ def main() -> None:
 
         # Need to do a warm up run before starting inner loop threads
         if count > 1:
+            pick_up_ball(gripper, panda)
 
-            detection_thread, panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread = start_inner_loop_threads(
+            panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread = start_inner_loop_threads(
                 pipe,
                 cam_params,
                 detector,
@@ -615,7 +568,6 @@ def main() -> None:
                 pose_estimates,
                 vis,
                 vis_event,
-                detection_event,
                 gripper_event,
                 reset_event,
                 exit_event
@@ -670,7 +622,6 @@ def main() -> None:
 
         msg_event.clear()
         vis_event.clear()
-        detection_event.clear()
         gripper_event.clear()
         reset_event.clear()
         exit_event.clear() # TODO: shouldn't clear exit

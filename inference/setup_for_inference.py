@@ -217,7 +217,7 @@ def finite_difference(x, prev_x, dt):
     return (1.0/dt) * (x - prev_x)
 
 
-@partial(jit, static_argnames=("angle_offset", "max_abs_vel"))
+@partial(jit, static_argnames=("car_angle_offset", "car_max_abs_vel", "car_pos_offset_x", "car_pos_offset_y"))
 def observe_car(
     floor_R: Array,
     floor_t: Array,
@@ -226,8 +226,10 @@ def observe_car(
     prev_q_car: Array,
     prev_qd_car: Array,
     dt: float,
-    angle_offset: float = pi,
-    max_abs_vel:  Array = array([2.0, 2.0, 2.0])
+    car_angle_offset: float = 0.0,
+    car_max_abs_vel:  Array = array([2.0, 2.0, 2.0]),
+    car_pos_offset_x: float = 0.0,
+    car_pos_offset_y: float = 0.0
     ) -> tuple[Array, Array, Array, Array]:
 
     # Compute the relative pose of the car with respect to the ground frame
@@ -236,10 +238,10 @@ def observe_car(
 
     x_dir = array((1.0, 0.0))
     x_dir_rotated = car_R_ground_frame[0:2, 0:2] @ x_dir # approximate rotation about z-axis
-    _theta = -arctan2(x_dir_rotated[1]*x_dir[0] - x_dir_rotated[0]*x_dir[1], x_dir_rotated[0]*x_dir[0] + x_dir_rotated[1]*x_dir[1])
-    theta = mod(_theta + angle_offset, 2*pi)
+    _theta = arctan2(x_dir[0]*x_dir_rotated[1] - x_dir[1]*x_dir_rotated[0], x_dir[0]*x_dir_rotated[0] + x_dir[1]*x_dir_rotated[1])
+    theta = mod(_theta + car_angle_offset, 2*pi)
 
-    q_car = array((car_t_ground_frame[0][0], -car_t_ground_frame[1][0], theta)) # car_x == cam_z, car_y == -cam_x
+    q_car = array((car_t_ground_frame[0][0], car_t_ground_frame[1][0], theta))
 
     qd_car = (finite_difference(q_car, prev_q_car, dt) + prev_qd_car) / 2.0 # Average of previous computed velocity and positional finite differences
 
@@ -252,7 +254,7 @@ def observe_car(
     qd_car = clip(
         qd_car.at[2].set(
             cond(abs(qd_car[2]) > 5.0, discontinuity, lambda: qd_car[2]) # Angle-wrap discontinuity correction
-    ), -max_abs_vel, max_abs_vel)
+    ), -car_max_abs_vel, car_max_abs_vel)
 
     return q_car, qd_car, car_R_ground_frame, car_t_ground_frame
 
@@ -349,10 +351,16 @@ def observe(
     robot_state: RobotState,
     gripper_state: GripperState,
     gripping: bool,
-    dt: float
+    dt: float,
+    car_pos_offset_x: float = 0.0,
+    car_pos_offset_y: float = 0.0
     ) -> tuple[Array, tuple[Array, ...]]:
 
-    q_car, qd_car, car_R_gf, car_t_gf = observe_car(floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt)
+    q_car, qd_car, car_R_gf, car_t_gf = observe_car(
+        floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt,
+        car_pos_offset_x=car_pos_offset_x,
+        car_pos_offset_y=car_pos_offset_y
+    )
     q_arm, qd_arm = observe_arm(robot_state)
     q_gripper, qd_gripper = observe_gripper(gripper_state, gripping)
 
