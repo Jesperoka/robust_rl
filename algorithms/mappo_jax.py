@@ -911,7 +911,7 @@ def main():
         # total_timesteps = 419_430_400,
         # total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
-        total_timesteps = 20_971_520,
+        total_timesteps = int(2*20_971_520),
         # total_timesteps = 2_097_152,
         # total_timesteps = 2_097_152 // 16,
         update_epochs   = 6,
@@ -992,7 +992,7 @@ def main():
     # checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     checkpointer = Checkpointer(StandardCheckpointHandler())
     state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(env_final.actors.train_states)}
-    checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), args=args.StandardSave(state))
+    checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), force=True, args=args.StandardSave(state))
     print("\n...actors saved.\n\n")
 
     rollout_generator_process.join()
