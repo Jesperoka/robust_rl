@@ -9,6 +9,5 @@ with open('sens.txt', 'r') as file:
 if __name__ == "__main__":
     Desk(SHOP_FLOOR_IP, username, password).activate_fci()
     panda = Panda(SHOP_FLOOR_IP)
-    pose = panda.get_state()
-    pose = panda.get_pose()
-    print(pose)
+    robot_state = panda.get_state()
+    print(robot_state.q)
