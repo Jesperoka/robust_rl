@@ -237,6 +237,99 @@ def arm_reward_4(db_target: Array, dc_goal: Array, qd_arm: Array, gripping: Arra
 # ----------------------------------------------------------------------------------------------------
 
 
+# Simpler Curriculum reward function
+# ----------------------------------------------------------------------------------------------------
+def simple_curriculum_reward(
+        max_steps: int,         # partial() this
+        decode_obs: ObsDecodeFuncSig, obs: Array, act: Array, gripping: Array, step: int,
+        ) -> tuple[Array, Array]:
+
+    # Decode observation for use in different reward functions
+    (
+        q_car, q_arm, q_gripper, p_ball, 
+        qd_car, qd_arm, qd_gripper, pd_ball, 
+        p_goal, 
+        dc_goal,
+        dcc_0, dcc_1, dcc_2, dcc_3,
+        dgc_0, dgc_1, dgc_2, dgc_3,
+        dbc_0, dbc_1, dbc_2, dbc_3,
+        db_target
+     ) = decode_obs(obs) 
+
+    # Car reward basis functions
+    car_a = max_steps/(2.0 - 1.0)
+    car_d = 2.0
+    car_s = 0.90
+
+    alpha_0 = gaussian(step, 0.0*car_a, car_a/car_d)
+    alpha_1 = gaussian(step, 1.0*car_a, car_a/car_d)
+
+    # Normalize the blending weights
+    alpha_sum = alpha_0 + alpha_1 
+    alpha_0, alpha_1 = alpha_0/alpha_sum, alpha_1/alpha_sum 
+
+    # Car reward
+    zeus_reward = (
+            alpha_0*simple_car_reward_0(dc_goal, q_car) 
+            + alpha_1*simple_car_reward_1(dc_goal, db_target, q_car) 
+    )
+
+    # Arm reward basis functions
+    arm_a = max_steps/(2.0 - 1.0)
+    arm_d = 2.0
+
+    beta_0 = gaussian(step, 0.0*arm_a, arm_a/arm_d)
+    beta_1 = gaussian(step, 1.0*arm_a, arm_a/arm_d)
+
+    # Normalize the blending weights
+    beta_sum = beta_0 + beta_1 
+    beta_0, beta_1 = beta_0/beta_sum, beta_1/beta_sum
+    
+    # Arm reward    
+    panda_reward = (
+            beta_0*simple_arm_reward_0(qd_arm, db_target, gripping) 
+            + beta_1*simple_arm_reward_1(qd_arm, gripping, db_target, dc_goal)
+    )
+
+    return zeus_reward.squeeze(), panda_reward.squeeze()
+# ----------------------------------------------------------------------------------------------------
+
+# Simple car scheduled rewards
+# ----------------------------------------------------------------------------------------------------
+def simple_car_reward_0(dc_goal: Array, q_car: Array) -> Array:
+    return -dc_goal + close_enough(dc_goal) + punish_car_outside_limits(q_car[0], q_car[1]) - 1.0
+
+def simple_car_reward_1(dc_goal: Array, db_target: Array, q_car: Array) -> Array:
+    return -dc_goal + db_target + close_enough(dc_goal) - close_enough(db_target) + punish_car_outside_limits(q_car[0], q_car[1]) - 1.0
+# ----------------------------------------------------------------------------------------------------
+
+# Simple arm scheduled rewards
+# ----------------------------------------------------------------------------------------------------
+def simple_arm_reward_0(qd_arm: Array, db_target: Array, gripping: Array) -> Array:
+    return (
+            gripping*1.0
+            + inverse_plus_one(qd_arm)
+            + (1 - gripping)*inverse_plus_one(db_target)
+            + punish_bad_joint_velocities(qd_arm)
+            )
+
+def simple_arm_reward_1(qd_arm: Array, gripping: Array, db_target: Array, dc_goal: Array) -> Array:
+    return (
+            gripping*(
+                - inverse_plus_one(dc_goal)
+                + 1.0/(0.2 + 1) # when car is within 0.2 of goal, rewards will be negative
+            )
+            +(1 - gripping)*(
+                inverse_plus_one(db_target) 
+                - 0.025*db_target
+                + plateau_01(db_target)
+                + plateau_03(db_target)
+                + close_enough(db_target)
+            )
+            + punish_bad_joint_velocities(qd_arm)
+        )
+# ----------------------------------------------------------------------------------------------------
+
 # Other 
 # ----------------------------------------------------------------------------------------------------
 MIN_REWARD = 0.0
@@ -326,20 +419,37 @@ def main():
     max_steps = 20_000_000 
     x = np.linspace(0, max_steps, 1000)  # Define training steps from 0 to 100
 
-    car_a = max_steps/(3.0 - 1.0)
-    car_d = 3.0
+    # car_a = max_steps/(3.0 - 1.0)
+    # car_d = 3.0
+    # car_s = 0.90
+
+    # car_y1 = gaussian(x, 0.0*car_a, car_a/car_d)
+    # car_y2 = gaussian(x, 1.0*car_a, car_a/car_d)
+    # car_y3 = gaussian(x, 2.0*car_a, car_a/(car_d - car_s))
+
+    # sum_car_y = car_y1 + car_y2 + car_y3
+    # car_y1, car_y2, car_y3 = car_y1/sum_car_y, car_y2/sum_car_y, car_y3/sum_car_y
+    
+    # plt.plot(x, car_y1, label='car_basis_0')
+    # plt.plot(x, car_y2, label='car_basis_1')
+    # plt.plot(x, car_y3, label='car_basis_2')
+    # plt.xlabel('Training Step')
+    # plt.ylabel('Function Value')
+    # plt.legend()
+    # plt.show()
+
+    car_a = max_steps/(2.0 - 1.0)
+    car_d = 2.0
     car_s = 0.90
 
     car_y1 = gaussian(x, 0.0*car_a, car_a/car_d)
     car_y2 = gaussian(x, 1.0*car_a, car_a/car_d)
-    car_y3 = gaussian(x, 2.0*car_a, car_a/(car_d - car_s))
 
-    sum_car_y = car_y1 + car_y2 + car_y3
-    car_y1, car_y2, car_y3 = car_y1/sum_car_y, car_y2/sum_car_y, car_y3/sum_car_y
+    sum_car_y = car_y1 + car_y2 
+    car_y1, car_y2 = car_y1/sum_car_y, car_y2/sum_car_y 
     
     plt.plot(x, car_y1, label='car_basis_0')
     plt.plot(x, car_y2, label='car_basis_1')
-    plt.plot(x, car_y3, label='car_basis_2')
     plt.xlabel('Training Step')
     plt.ylabel('Function Value')
     plt.legend()

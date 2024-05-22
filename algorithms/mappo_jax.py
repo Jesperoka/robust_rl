@@ -870,7 +870,7 @@ def main():
     from environments.A_to_B_jax import A_to_B
     from environments.options import EnvironmentOptions
     from environments.physical import ZeusLimits, PandaLimits
-    from environments.reward_functions import car_only_negative_distance, curriculum_reward 
+    from environments.reward_functions import car_only_negative_distance, curriculum_reward, simple_curriculum_reward
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
@@ -901,20 +901,20 @@ def main():
     mjx_data: mjx.Data = mjx.put_data(model, data)
     grip_site_id: int = mj_name2id(model, mjtObj.mjOBJ_SITE.value, "grip_site")
 
-    num_envs = 2048 # 4096 
+    num_envs = 4096 
     minibatch_size = 64 
 
     config: AlgorithmConfig = AlgorithmConfig(
         lr              = 1.0e-3, #3.0e-4,
         num_envs        = num_envs,
-        num_env_steps   = 5, # NOTE: I might want to increase rollout length for more stability in learning to wait before throwing
+        num_env_steps   = 5,
         # total_timesteps = 419_430_400,
-        # total_timesteps = 209_715_200,
+        total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
-        total_timesteps = int(2*20_971_520),
+        # total_timesteps = int(2*20_971_520),
         # total_timesteps = 2_097_152,
         # total_timesteps = 2_097_152 // 16,
-        update_epochs   = 6,
+        update_epochs   = 5,
         num_minibatches = num_envs // minibatch_size,
         gamma           = 0.99,
         gae_lambda      = 0.90,
@@ -932,7 +932,8 @@ def main():
     config.minibatch_size = config.num_actors // config.num_minibatches # config.num_actors * config.num_env_steps // config.num_minibatches
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn           = partial(curriculum_reward, config.num_updates),
+        # reward_fn           = partial(curriculum_reward, config.num_updates),
+        reward_fn           = partial(simple_curriculum_reward, config.num_updates),
         # arm_ctrl            = ,
         arm_low_level_ctrl  = arm_spline_tracking_controller,
         gripper_ctrl        = gripper_ctrl,
@@ -988,8 +989,6 @@ def main():
 
 
     print("\n\nsaving actors...\n")
-    # checkpointer = Checkpointer(PyTreeCheckpointHandler())
-    # checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE), state=env_final.actors, force=True, args=args.PyTreeSave(env_final.actors))
     checkpointer = Checkpointer(StandardCheckpointHandler())
     state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(env_final.actors.train_states)}
     checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), force=True, args=args.StandardSave(state))
@@ -1012,7 +1011,6 @@ def main():
     actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
     print("\nrestoring actors...\n")
-    # restored_actors = checkpointer.restore(join(CHECKPOINT_DIR,"checkpoint_LATEST"), state=actors, args=args.PyTreeRestore(actors))
     abstract_state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(actors.train_states)}
     restored_state = checkpointer.restore(
             join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), 
@@ -1022,8 +1020,6 @@ def main():
     restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_actors.train_states[0].params))
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[1].params, restored_actors.train_states[1].params))
-    # assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[0], restored_actors.vars[0]))
-    # assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.vars[1], restored_actors.vars[1]))
     print("\n..actors restored.\n\n")
 
     inputs = tuple(
