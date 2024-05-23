@@ -1,6 +1,15 @@
-import threading
-import multiprocessing
+from torch import set_num_threads, set_num_interop_threads
+set_num_threads(1)
+set_num_interop_threads(1)
+import torch.multiprocessing as multiprocessing
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")
+
 import os
+import threading
+
+from multiprocessing.sharedctypes import Synchronized
+from multiprocessing.synchronize import Event as mp_Event
 from jax import jit
 from jax.tree_util import Partial
 from jax._src.pjit import JitWrapped
@@ -13,12 +22,24 @@ from jax.numpy import logical_and, logical_or
 from typing import Callable, NamedTuple, Self, TypeAlias
 from panda_py import Panda, PandaContext, controllers
 from panda_py.libfranka import Robot, RobotState, Duration, Gripper, GripperState, Torques, set_current_thread_to_highest_scheduler_priority
+from ultralytics.models import YOLOWorld
 from websockets.sync.client import connect
 from enum import IntEnum
 from time import clock_gettime_ns, CLOCK_BOOTTIME, sleep
 from json import dumps
 from environments.physical import PandaLimits
-from inference.setup_for_inference import setup_camera, setup_env, load_policies, setup_panda, observe, policy_inference, reset_goal_pos, rotation_velocity_modifier
+from inference.setup_for_inference import (
+        setup_env,
+        setup_camera,
+        setup_yolo,
+        load_policies,
+        setup_panda,
+        observe,
+        policy_inference,
+        reset_goal_pos,
+        rotation_velocity_modifier,
+        ball_pos_cam_frame,
+)
 from inference.processing import LowPassFilter
 from inference.controllers import arm_spline_tracking_controller
 from environments.A_to_B_jax import A_to_B
@@ -28,6 +49,8 @@ from pupil_apriltags import Detector, Detection
 
 
 ZEUS_URI = "ws://192.168.4.1:8765"
+BALL_DETECTION_CPUS = {0}
+PANDA_CPUS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
 
 ZeusMode = IntEnum("ZeusMode", ["STANDBY", "ACT", "CONTINUE"], start=0)
 
@@ -50,17 +73,18 @@ class ZeusMessage:
 
             return self.msg
 
-# WARNING: UNFINISHED
+# could refactor this to use shared buffer arrays and values for compatability with not using os.fork()
 class ControllerData:
-    mtx = threading.Lock()
+    mtx = multiprocessing.RLock()
 
-    def __init__(self,
-                 b0: np.ndarray = np.array(PandaLimits().q_start),
-                 b1: np.ndarray = np.array(PandaLimits().q_start),
-                 b2: np.ndarray = np.array(PandaLimits().q_start),
-                 b3: np.ndarray = np.array(PandaLimits().q_start),
-                 t: float = 0.0
-                 ) -> None:
+    def __init__(
+        self,
+        b0: np.ndarray = np.array(PandaLimits().q_start),
+        b1: np.ndarray = np.array(PandaLimits().q_start),
+        b2: np.ndarray = np.array(PandaLimits().q_start),
+        b3: np.ndarray = np.array(PandaLimits().q_start),
+        t: float = 0.0
+        ) -> None:
 
         self.b0 = b0
         self.b1 = b1
@@ -75,7 +99,7 @@ class ControllerData:
             self.b2 = self.b3
             self.b3 = b_new
 
-    def update_time(self, duration: float) -> None: # NOTE: can remove mutex if time is only updated by control callback
+    def update_time(self, duration: float) -> None:
         with self.mtx:
             self.t = min(self.t + duration, 1.0)
 
@@ -87,9 +111,14 @@ class ControllerData:
         with self.mtx:
             return self.b0, self.b1, self.b2, self.b3, self.t
 
-    def copy(self) -> Self:
+    def reset(self):
         with self.mtx:
-            return self.__class__(self.b0, self.b1, self.b2, self.b3, self.t)
+            self.b0 = np.array(PandaLimits().q_start)
+            self.b1 = np.array(PandaLimits().q_start)
+            self.b2 = np.array(PandaLimits().q_start)
+            self.b3 = np.array(PandaLimits().q_start)
+            self.t = 0.0
+
 
 class _gripper_state:
     mtx = threading.Lock()
@@ -106,17 +135,36 @@ class _gripper_state:
         with self.mtx:
             return self.state
 
+def _ball_pos_shared_array(dims=3) -> np.ndarray:
+    buffer = multiprocessing.Array("f", dims)
+    arr = np.frombuffer(buffer.get_obj(), dtype=np.float32)
+    np.copyto(arr, np.zeros(dims, dtype=np.float32))
+
+    return arr
+
+def _latest_frame_shared_array(width: int, height: int, channels: int | None=None) -> np.ndarray:
+    if channels is not None:
+        buffer = multiprocessing.Array("B", width*height*channels)
+        arr = np.frombuffer(buffer.get_obj(), dtype=np.uint8).reshape((height, width, channels))
+        np.copyto(arr, np.zeros((height, width, channels), dtype=np.uint8))
+    else:
+        buffer = multiprocessing.Array("B", width*height)
+        arr = np.frombuffer(buffer.get_obj(), dtype=np.uint8).reshape((height, width))
+        np.copyto(arr, np.zeros((height, width), dtype=np.uint8))
+
+    return arr
 
 class Pose(NamedTuple):
     R: np.ndarray = np.eye(3)
     t: np.ndarray = np.zeros((3, 1))
 
 class PoseEstimates:
-    car_pose = Pose()
-    floor_pose = Pose()
     mtx = threading.Lock()
 
-    def update_data(self, data) -> None:
+    car_pose = Pose()
+    floor_pose = Pose()
+
+    def update_poses(self, data) -> None:
         with self.mtx:
             self.car_pose = data[0] if data[0] is not None else self.car_pose
             self.floor_pose = data[1] if data[1] is not None else self.floor_pose
@@ -125,11 +173,18 @@ class PoseEstimates:
         with self.mtx:
             return self.car_pose, self.floor_pose
 
+    def reset(self) -> None:
+        with self.mtx:
+            self.car_pose = Pose()
+            self.floor_pose = Pose()
+
 VizData: TypeAlias = Pose
 
 class Visualization:
     mtx = threading.Lock()
+    p_mtx = multiprocessing.Lock()
 
+    _clean_frame: np.ndarray
     frame: np.ndarray
     K: np.ndarray
     dist_coeffs: np.ndarray
@@ -165,7 +220,7 @@ class Visualization:
 def websocket_client(
         msg: ZeusMessage,
         msg_event: threading.Event,
-        exit_event: threading.Event,
+        exit_event: mp_Event,
         num_stop_cmds: int = 5,
         num_act_cmds: int = 5,
     ) -> None:
@@ -223,20 +278,23 @@ def apriltag_detection(
     return viz_data, image, got_frame
 
 
-def _ctrl_callback(
-    ctrl_data: ControllerData, controller: Callable,
-    robot_state: RobotState, dt: float
-    ) -> Torques:
+def _ctrl_fn(
+    controller: Callable,
+    ctrl_data: ControllerData,
+    robot_state: RobotState,
+    dt: float
+    ) -> np.ndarray:
 
     b0, b1, b2, b3, t = ctrl_data.read()
-    ctrl_data.update_time(dt) # TODO: remove mutexes
+    ctrl_data.update_time(dt)
 
+    # TODO: fix qd vs dq naming
     tau = controller(
         dt=dt,
         t=t,
         q=np.array(robot_state.q),
-        dq=np.array(robot_state.dq),
-        ddq=np.array(robot_state.ddq_d),
+        qd=np.array(robot_state.dq),
+        qdd=np.array(robot_state.ddq_d),
         b0=b0,
         b1=b1,
         b2=b2,
@@ -248,73 +306,68 @@ def _ctrl_callback(
     KP = np.array([200.0, 200.0, 200.0, 200.0, 80.0, 80.0, 80.0], dtype=np.float32)
     KD = np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], dtype=np.float32)
 
-    tau = KP*(q_ref - np.array(robot_state.q)) + KD*(np.zeros_like(robot_state.dq))
+    tau = KP*(q_ref - np.array(robot_state.q)) + KD*(np.zeros_like(robot_state.dq) - np.array(robot_state.dq))
 
-
-    # return Torques(tau.squeeze())
     return tau.squeeze()
 
 
-def start_inner_loop_threads(
-    pipe: pipeline,
-    cam_params: tuple[float, float, float, float],
-    detector: Detector,
+def start_inner_control_loops(
     gripper: Gripper,
     gripper_state: _gripper_state,
     panda: Panda,
     ctx: PandaContext,
     controller: Compiled,
     ctrl_data: ControllerData,
-    pose_estimates: PoseEstimates,
-    vis: Visualization,
-    vis_event: threading.Event,
     gripper_event: threading.Event,
-    reset_event: threading.Event,
-    exit_event: threading.Event
-    ) -> tuple[multiprocessing.Process, threading.Thread, threading.Thread]:
+    reset_event: mp_Event,
+    exit_event: mp_Event
+    ) -> tuple[multiprocessing.Process, threading.Thread]:
 
-    def panda_ctrl(
-        panda: Panda,
-        ctrl_data: ControllerData,
-        exit_event: threading.Event,
-        reset_event: threading.Event
-        ):
-
-        panda_ctrl_callback = partial(_ctrl_callback, ctrl_data, controller)
-        panda.move_to_start()
-        ctrl = controllers.AppliedTorque()
-        res = set_current_thread_to_highest_scheduler_priority("couldn't set priority")
-        panda.start_controller(ctrl)
-
-        with ctx:
-            while ctx.ok() and not exit_event.is_set() and not reset_event.is_set():
-                # dt =
-                state = panda.get_state()
-                tau = _ctrl_callback(ctrl_data, controller, state, 0.001)
-                tau = panda_ctrl_callback(state, Duration(1))
-                ctrl.set_control(tau)
-
-        panda.stop_controller()
-        panda.move_to_start()
-        print("Stopped Panda controller...")
-
+    # def panda_ctrl(
+    #     panda: Panda,
+    #     ctrl_data: ControllerData,
+    #     reset_event: mp_Event,
+    #     exit_event: mp_Event
+    #     ):
+    #
+    #     panda_ctrl_callback = partial(_ctrl_fn, controller)
+    #     panda.move_to_start()
+    #     ctrl = controllers.AppliedTorque()
+    #     set_current_thread_to_highest_scheduler_priority("couldn't set priority")
+    #     panda.start_controller(ctrl)
+    #
+    #     with ctx:
+    #         t = panda.get_state().time.to_sec()
+    #         while not exit_event.is_set() and not reset_event.is_set(): # and ctx.ok()
+    #             state = panda.get_state()
+    #             dt = state.time.to_sec() - t
+    #
+    #             tau = panda_ctrl_callback(ctrl_data, state, dt)
+    #             ctrl.set_control(tau)
+    #
+    #             t = state.time.to_sec()
+    #
+    #     panda.stop_controller()
+    #     panda.move_to_start()
+    #     print("Stopped Panda controller...")
 
     def gripper_state_reader(
         gripper: Gripper,
         gripper_state: _gripper_state,
+        exit_event: mp_Event
         ):
-        while not exit_event.is_set() and not reset_event.is_set():
-            gs = gripper.read_once()
-            gripper_state.update(gs)
-
-            sleep(0.1)
+        print("Starting Gripper state reader daemon thread...")
+        while not exit_event.is_set():
+            gripper_state.update(gripper.read_once())
+            sleep(0.5)
 
     def gripper_ctrl(
             gripper: Gripper,
-            exit_event: threading.Event,
-            reset_event: threading.Event
+            gripper_event: threading.Event,
+            reset_event: mp_Event,
+            exit_event: mp_Event,
         ):
-
+        print("Starting Gripper controller...")
         while not exit_event.is_set() and not reset_event.is_set():
             result = gripper_event.wait(timeout=0.5)
             if not result: continue
@@ -325,16 +378,70 @@ def start_inner_loop_threads(
         gripper.stop()
         print("Stopped Gripper controller...")
 
-    # TODO: rename once I found out which are best as processes/threads
-    panda_ctrl_process = multiprocessing.Process(target=panda_ctrl, args=(panda, ctrl_data, exit_event, reset_event))
-    gripper_ctrl_thread = threading.Thread(target=gripper_ctrl, args=(gripper, exit_event, reset_event))
-    gripper_state_reader_thread = threading.Thread(target=gripper_state_reader, args=(gripper, gripper_state))
+    # Processes
+    # panda_ctrl_process = multiprocessing.Process(target=panda_ctrl, args=(panda, ctrl_data, reset_event, exit_event))
+    # panda_ctrl_process.start()
 
+    # Threads
+    gripper_ctrl_thread = threading.Thread(target=gripper_ctrl, args=(gripper, gripper_event, reset_event, exit_event))
     gripper_ctrl_thread.start()
-    panda_ctrl_process.start()
+
+    gripper_state_reader_thread = threading.Thread(target=gripper_state_reader, args=(gripper, gripper_state, exit_event), daemon=True)
     gripper_state_reader_thread.start()
 
-    return panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread
+    return gripper_ctrl_thread
+
+# needs to be defined at module level
+def estimate_ball_pos(
+    ball_pos: np.ndarray,
+    latest_frame: np.ndarray,
+    reset_event: mp_Event,
+    exit_event: mp_Event,
+    process_ready_event: mp_Event
+    ) -> None:
+    print("Starting ball observation process...")
+
+    os.sched_setaffinity(0, BALL_DETECTION_CPUS)
+    _ball_pos_cam_frame = ball_pos_cam_frame.lower(np.ones(4)).compile()
+
+    detect_ball = setup_yolo()
+
+    no_detects = 0
+    max_no_detects = 200
+    process_ready_event.set()
+    while not exit_event.is_set() and not reset_event.is_set() and no_detects < max_no_detects:
+        result = detect_ball(latest_frame)
+
+        if result.shape[0] == 0:
+            no_detects += 1
+            if no_detects >= max_no_detects:
+                print("Aborting ball observation process...")
+                exit(1)
+            sleep(0.08)
+            continue
+
+        np.copyto(ball_pos, _ball_pos_cam_frame(result))
+        # print("Ball positn:", ball_pos)
+        no_detects = 0
+        sleep(0.08)
+
+# Runs YOLOv8s-world forward pass on the latest frame.
+# Kept in a separate process to avoid blocking the main loop during inference.
+def start_ball_observation_process(
+    ball_pos: np.ndarray, # shared buffer array
+    latest_frame: np.ndarray, # shared buffer array
+    reset_event: mp_Event,
+    exit_event: mp_Event,
+    process_ready_event: mp_Event
+    ) -> multiprocessing.Process:
+
+    # mp_ctx = multiprocessing.get_context("spawn")
+    ball_obs_process = multiprocessing.Process(target=estimate_ball_pos, args=(ball_pos, latest_frame, reset_event, exit_event, process_ready_event))
+    ball_obs_process.start()
+    process_ready_event.wait()
+    process_ready_event.clear()
+
+    return ball_obs_process
 
 
 def pick_up_ball(
@@ -344,7 +451,6 @@ def pick_up_ball(
     pick_up_joints: np.ndarray = np.array([2.3437016375420385, 0.8570955322834483, -0.033515140057655705, -1.9930821339289344, 0.124799286352258, 2.8073062164783473, 1.3742789834092062])
     ) -> None:
 
-    # panda.move_to_start()
     gripper.move(width=0.08, speed=0.05)
     panda.move_to_joint_position(pre_pick_up_joints)
     panda.move_to_joint_position(pick_up_joints, speed_factor=0.01)
@@ -358,8 +464,8 @@ def pick_up_ball(
     panda.move_to_start()
 
 
-# WARNING: UNFINISHED
 def loop_body(
+    # partial() before all rollouts
     pipe: pipeline,
     cam_params: tuple[float, float, float, float],
     detector: Detector,
@@ -369,21 +475,31 @@ def loop_body(
     gripper: Gripper,
     gripper_state: _gripper_state,
     panda: Panda,
+    panda_low_level_ctrl: Callable,
+    ball_pos: np.ndarray, # shared buffer array
+    latest_frame: np.ndarray, # shared buffer array
     msg: ZeusMessage,
     vis: Visualization,
     msg_event: threading.Event,
-    exit_event: threading.Event,
-    vis_event: threading.Event,
     gripper_event: threading.Event,
+    exit_event: mp_Event,
+
+    # Argument to loop_body() during rollouts
+    inference_carry: tuple,
+    torque_controller: controllers.AppliedTorque,
     ctrl_data: ControllerData,
     pose_estimates: PoseEstimates,
-    inference_carry: tuple,
+
+    # Constants
     ctrl_time_ns: float = 0.04,
     car_goal_radius: float = 0.1,
     ball_goal_radius: float = 0.1,
     num_agents: int = 2,
     lowpass_filter: LowPassFilter = LowPassFilter(input_shape=_EnvOpts(None).obs_min.shape, history_length=10, bandlimit_hz=0.75, sample_rate_hz=1.0/0.04) # type: ignore[arg-type]
     ) -> tuple[tuple, bool, bool]:
+
+    start_ns = clock_gettime_ns(CLOCK_BOOTTIME)
+    atleast_once = True
 
     (
         actors,
@@ -394,6 +510,7 @@ def loop_body(
         ball_released,
         p_goal,
         dt,
+        warmup
     ) = inference_carry
 
     car_pose, floor_pose = pose_estimates.get_data()
@@ -426,8 +543,9 @@ def loop_body(
      ) = decode_obs(obs)
 
     done = logical_or(dc_goal <= car_goal_radius, db_target <= ball_goal_radius)
+    # print(dc_goal, q_car[0:2], p_goal)
+    # print(db_target, p_ball, p_goal)
     # done = logical_and(done, np.array(False))
-    print(q_car, dc_goal, db_target)
 
     actions, actor_hidden_states = policy_inference(
         num_agents,
@@ -451,30 +569,44 @@ def loop_body(
     ball_released = True if a_gripper >= 0.0 else ball_released
 
     velocity = rotation_velocity_modifier(magnitude, rot_vel)
+
+    # Send actions to agents
     msg.write(float(velocity), float(angle), float(rot_vel), ZeusMode.ACT)
     msg_event.set()
-
-    # TOOD: ctrl_data.update_release_timing(a_gripper)
     ctrl_data.update_ctrl_points(b_new)
     ctrl_data.zero_time()
 
     # Inner loop
-    start_ns = clock_gettime_ns(CLOCK_BOOTTIME)
-    while clock_gettime_ns(CLOCK_BOOTTIME) - start_ns < ctrl_time_ns:
-        if a_gripper >= 0.0 and not ball_released and (clock_gettime_ns(CLOCK_BOOTTIME) - start_ns)/1e9 >= a_gripper:
+    t_ns = clock_gettime_ns(CLOCK_BOOTTIME)
+    while t_ns - start_ns < ctrl_time_ns or atleast_once:
+        atleast_once = False
+
+        # Gripper release logic
+        if a_gripper >= 0.0 and not ball_released and (t_ns - start_ns)/1e9 >= a_gripper:
             gripper_event.set()
 
-    # frame = pipe.wait_for_frames().get_infrared_frame()
+        if not warmup:
+            state = panda.get_state()
+            dt = (clock_gettime_ns(CLOCK_BOOTTIME) - t_ns) / 1e9
+            tau = panda_low_level_ctrl(ctrl_data, state, dt)
+            torque_controller.set_control(tau)
+
+        t_ns = clock_gettime_ns(CLOCK_BOOTTIME)
+
+
     data, frame, got_frame = apriltag_detection(pipe, cam_params, detector)
     if got_frame:
-        pose_estimates.update_data(data)
+        pose_estimates.update_poses(data)
         vis.update_data(data, frame)
+        np.copyto(latest_frame, frame)
 
-    vis.draw_axes()
-    vis.imshow()
-    if cv2.waitKey(4) & 0xFF == ord('q'):
-        exit_event.set()
-        return (None, None, None, None, None, None, None, None), True, True
+    # vis.draw_axes()
+    # vis.imshow()
+    # if cv2.waitKey(4) & 0xFF == ord('q'):
+    #     exit_event.set()
+    #     return (None, None, None, None, None, None, None, None), True, True
+
+    dt = (clock_gettime_ns(CLOCK_BOOTTIME) - start_ns)/1e9
 
     return (
         actors,
@@ -484,12 +616,15 @@ def loop_body(
         qd_car,
         ball_released,
         p_goal,
-        clock_gettime_ns(CLOCK_BOOTTIME) - start_ns # dt
+        dt,
+        warmup
     ), bool(done), False
 
 
 
 def main() -> None:
+    os.sched_setaffinity(0, {5})
+
     rnn_hidden_size = 16
     rnn_fc_size = 64
     env, decode_obs = setup_env() # TODO: return all env functions I need
@@ -497,81 +632,87 @@ def main() -> None:
     pipe, cam_params, dist_coeffs, K, R, t, width, height, detector = setup_camera()
     panda, panda_ctx, gripper, desk = setup_panda()
     gripper_state = _gripper_state(gripper.read_once())
+    torque_controller = controllers.AppliedTorque()
+    # set_current_thread_to_highest_scheduler_priority("couldn't set priority")
+
+    # Shared memory arrays
+    ball_pos = _ball_pos_shared_array(3)
+    latest_frame = _latest_frame_shared_array(width, height)
 
     msg = ZeusMessage()
     vis = Visualization(width, height, K, dist_coeffs)
     msg_event = threading.Event()
-    vis_event = threading.Event()
     gripper_event = threading.Event()
-    reset_event = threading.Event()
-    exit_event = threading.Event()
-
-    _loop_body = partial(
-        loop_body,
-        pipe,
-        cam_params,
-        detector,
-        env,
-        decode_obs,
-        apply_fns,
-        gripper,
-        gripper_state,
-        panda,
-        msg,
-        vis,
-        msg_event,
-        exit_event,
-        vis_event,
-        gripper_event,
-    )
+    reset_event = multiprocessing.Event()
+    exit_event = multiprocessing.Event()
+    process_ready_event = multiprocessing.Event()
 
     _ = ControllerData()
     __ = panda.get_state()
     b0, b1, b2, b3, t = _.read()
+    # TODO: fix qd vs dq naming
     controller = jit(partial(arm_spline_tracking_controller, vel_margin=0.05), static_argnames=("vel_margin", )).lower(
         dt=0.001, vel_margin=0.05, t=t, q=np.array(__.q), qd=np.array(__.dq), qdd=np.array(__.ddq_d), b0=b0, b1=b1, b2=b2, b3=b3
     ).compile()
 
+    # TODO: pass to partial
+    ctrl_data = ControllerData()
+    pose_estimates = PoseEstimates()
+
+    _loop_body = partial(
+        loop_body,
+        pipe=pipe,
+        cam_params=cam_params,
+        detector=detector,
+        env=env,
+        decode_obs=decode_obs,
+        apply_fns=apply_fns,
+        gripper=gripper,
+        gripper_state=gripper_state,
+        panda=panda,
+        panda_low_level_ctrl=partial(_ctrl_fn, controller),
+        ball_pos=ball_pos,
+        latest_frame=latest_frame,
+        msg=msg,
+        vis=vis,
+        msg_event=msg_event,
+        gripper_event=gripper_event,
+        exit_event=exit_event
+    )
+
     websocket_client_thread = threading.Thread(target=websocket_client, args=(msg, msg_event, exit_event))
     websocket_client_thread.start()
+
+    ball_detection_process = start_ball_observation_process(
+        ball_pos,
+        latest_frame,
+        reset_event,
+        exit_event,
+        process_ready_event,
+    )
+
+    gripper_ctrl_thread = start_inner_control_loops(
+        gripper,
+        gripper_state,
+        panda,
+        panda_ctx,
+        controller,
+        ctrl_data,
+        gripper_event,
+        reset_event,
+        exit_event
+    )
 
     print("Starting inference...")
     count = 1
     all_rollouts_done = False
-    while not all_rollouts_done: # TODO: exit_event.is_set()
+    while not all_rollouts_done and not exit_event.is_set():
         print("Resetting before rollout...")
+        gripper_event.clear()
         reset_event.clear()
 
-        ctrl_data = ControllerData()
-        pose_estimates = PoseEstimates()
-
-        loop_body_fn = partial(
-            _loop_body,
-            ctrl_data,
-            pose_estimates
-        )
-
-        # Need to do a warm up run before starting inner loop threads
-        if count > 1:
-            pick_up_ball(gripper, panda)
-
-            panda_ctrl_process, gripper_ctrl_thread, gripper_state_reader_thread = start_inner_loop_threads(
-                pipe,
-                cam_params,
-                detector,
-                gripper,
-                gripper_state,
-                panda,
-                panda_ctx,
-                controller,
-                ctrl_data,
-                pose_estimates,
-                vis,
-                vis_event,
-                gripper_event,
-                reset_event,
-                exit_event
-            )
+        ctrl_data.reset()
+        pose_estimates.reset()
 
         p_goal = reset_goal_pos(env.car_limits.x_min, env.car_limits.x_max, env.car_limits.y_min, env.car_limits.y_max)
         print("p_goal:", p_goal)
@@ -584,51 +725,66 @@ def main() -> None:
             np.zeros(3, dtype=np.float32),  # prev_qd_car
             False,                          # ball_released
             p_goal,
-            99999.9                         # dt
+            99999.9,                        # dt
+            count == 1                      # warmup
         )
+
+        # Need to do a warm up run before starting inner loop threads
+        if count > 1:
+            pick_up_ball(gripper, panda)
+            panda.start_controller(torque_controller)
 
         print("Running rollout...")
         rollout_count = 0
         current_rollout_done = False
-        while not current_rollout_done and rollout_count < 100_000_000:
+        with panda_ctx:
+            while not current_rollout_done and rollout_count < 10_000_000 and panda_ctx.ok():
 
-            # We catch all exceptions to be able to clean up some stuff (had problems with Ubuntu hanging)
-            try:
-                inference_carry, current_rollout_done, all_rollouts_done = loop_body_fn(inference_carry)
-            except Exception as e:
-                exit_event.set()
-                current_rollout_done, all_rollouts_done = True, True
-                print(f"Exception caught in loop_body(), stopping...\n\n{format_exc()}")
+                # We catch all exceptions to be able to clean up some stuff (had problems with Ubuntu hanging)
+                try:
+                    inference_carry, current_rollout_done, all_rollouts_done = _loop_body(
+                        inference_carry=inference_carry,
+                        torque_controller=torque_controller,
+                        ctrl_data=ctrl_data,
+                        pose_estimates=pose_estimates,
+                    )
 
-            rollout_count += 1
+                    # Warmup
+                    if count == 1 and rollout_count < 5:
+                        current_rollout_done = False
+                    elif count == 1 and rollout_count >= 5:
+                        current_rollout_done = True
+
+                except Exception as e:
+
+                    exit_event.set()
+                    current_rollout_done, all_rollouts_done = True, True
+                    print(f"Exception caught in loop_body(), stopping...\n\n{format_exc()}")
+
+                rollout_count += 1
 
         print("Rollout done.")
-
-        # Stop arm and car
-        reset_event.set()
         msg.write(0, 0, 0, ZeusMode.STANDBY)
         msg_event.set()
-
-        exit_event.set()
+        panda.stop_controller()
+        reset_event.set()
+        cv2.destroyAllWindows()
 
         if count > 1:
-            panda_ctrl_process.join()
-            detection_thread.join()
-            gripper_ctrl_thread.join()
-            gripper_state_reader_thread.join()
+            # panda_ctrl_process.join(timeout=20)
+            # gripper_ctrl_thread.join(timeout=20)
+            pass
 
         all_rollouts_done = True if count >= 4 else False # TODO: proper logic for multiple rollouts
         count += 1
 
-        msg_event.clear()
-        vis_event.clear()
-        gripper_event.clear()
-        reset_event.clear()
-        exit_event.clear() # TODO: shouldn't clear exit
-
+    cv2.destroyAllWindows()
     exit_event.set()
     pipe.stop()
-    websocket_client_thread.join()
+    websocket_client_thread.join(timeout=10)
+    # panda_ctrl_process.join(timeout=10)
+    gripper_ctrl_thread.join(timeout=10)
+    ball_detection_process.join(timeout=10)
 
     # Relinquish control of Panda
     panda.move_to_start()

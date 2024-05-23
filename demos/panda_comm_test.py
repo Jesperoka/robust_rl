@@ -6,11 +6,15 @@ An example indicating the network performance.
 @warning Before executing this example, make sure there is enough space in front of the robot.
 """
 import sys
-
+import os
+import numpy as np
 import panda_py
 from panda_py import constants, controllers
+from environments.physical import PandaLimits
 
 if __name__ == '__main__':
+  os.sched_setaffinity(0, {0}) # testing if a single core is enough
+
   if len(sys.argv) < 2:
     raise RuntimeError(f'Usage: python {sys.argv[0]} <robot-hostname>')
 
@@ -31,6 +35,8 @@ if __name__ == '__main__':
   with panda.create_context(frequency=1e3, max_runtime=10) as ctx:
     while ctx.ok():
       success_rate = panda.get_state().control_command_success_rate
+      tau = 100*(PandaLimits().q_start - np.array(panda.get_state().q)) + 10*(0.0 - np.array(panda.get_state().dq))
+      controller.set_control(tau)
       if ctx.num_ticks % 100 == 0:
         print(f'#{ctx.num_ticks} Current success rate: {success_rate:.3f}')
       AVG_SUCCESS_RATE += success_rate

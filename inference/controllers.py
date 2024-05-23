@@ -1,7 +1,7 @@
 """Definitions of controllers, coupled to the environment by 'decode_action(act)' and 'decode_observation(obs)' function(s)."""
 # NOTE: if I want to make an MPC controller I need to couple it via n_step() as well
 
-from jax import Array 
+from jax import Array
 from jax.numpy import array, float32, clip, diag, stack, zeros_like, where, abs as jnp_abs
 from jax.lax import cond
 from environments.options import ObsDecodeFuncSig
@@ -9,13 +9,13 @@ from environments.physical import PandaLimits, ZeusLimits
 
 # Just for LSP to see function signatures during development
 # ----------------------------------------------------------------------------------------------------
-______ = False 
+______ = False
 if ______: assert not ______; from environments.A_to_B_jax import A_to_B; A_to_B.decode_observation; A_to_B.decode_action
 # ----------------------------------------------------------------------------------------------------
 
-   # decode_obs -> (q_car, q_arm, q_gripper, p_ball, 
-             #     qd_car, qd_arm, qd_gripper, pd_ball, 
-             #     p_goal, 
+   # decode_obs -> (q_car, q_arm, q_gripper, p_ball,
+             #     qd_car, qd_arm, qd_gripper, pd_ball,
+             #     p_goal,
              #     d_goal,
              #     dcc_0, dcc_1, dcc_2, dcc_3,
              #     dgc_0, dgc_1, dgc_2, dgc_3,
@@ -52,8 +52,8 @@ def arm_fixed_pose(decode_obs: ObsDecodeFuncSig, obs: Array, a_arm: Array, pose:
     return tau
 
 def gripper_ctrl(action: Array) -> Array:
-    grip = array([0.02, -0.005, 0.02, -0.005], dtype=float32)                                      
-    release = array([0.04, 0.05, 0.04, 0.05], dtype=float32)                                          
+    grip = array([0.02, -0.005, 0.02, -0.005], dtype=float32)
+    release = array([0.04, 0.05, 0.04, 0.05], dtype=float32)
 
     return where(action > 0.0, grip, release)
 
@@ -84,10 +84,10 @@ def arm_spline_tracking_controller(
     qd_ref = clip(qd_ref, PandaLimits().q_dot_min, PandaLimits().q_dot_max)
 
     # Position and velocity PD control
-    tau_pos = diag_gain_PD(q, q_ref, qd, qd_ref, kp_pos, 0.5*kd_pos) 
+    tau_pos = diag_gain_PD(q, q_ref, qd, qd_ref, kp_pos, 0.5*kd_pos)
     tau_vel = diag_gain_PD(qd, qd_ref, qdd, zeros_like(qdd), 0.5*kd_pos, kd_vel)
 
-    # Tries to avoid going over velocity limits 
+    # Tries to avoid going over velocity limits
     positive_limiter = where(qd + dt*qdd >= PandaLimits().q_dot_max - vel_margin, 1.0, 0.0)
     negative_limiter = where(qd + dt*qdd <= PandaLimits().q_dot_min + vel_margin, 1.0, 0.0)
     additive_limiter = 0.80*(positive_limiter*PandaLimits().tau_min + negative_limiter*PandaLimits().tau_max)
@@ -95,7 +95,7 @@ def arm_spline_tracking_controller(
 
     tau = multiplicative_limiter*(tau_pos + tau_vel) + additive_limiter
     tau = clip(tau, 0.90*PandaLimits().tau_min, 0.90*PandaLimits().tau_max)
-    
+
     return tau
 
 
@@ -112,9 +112,9 @@ def arm_spline_tracking_controller(
 def cubic_b_spline(t: Array, b0: Array, b1: Array, b2: Array, b3: Array):
     T = (1.0/6.0)*array([t**3, t**2, t, 1.0])
     C = array([
-        [-1, 3, -3, 1], 
-        [3, -6, 3, 0], 
-        [-3, 0, 3, 0], 
+        [-1, 3, -3, 1],
+        [3, -6, 3, 0],
+        [-3, 0, 3, 0],
         [1, 4, 1, 0],
                ])
     B = stack([b0, b1, b2, b3], axis=0)
@@ -125,9 +125,9 @@ def cubic_b_spline(t: Array, b0: Array, b1: Array, b2: Array, b3: Array):
 def d_dt_cubic_b_spline(t: Array, b0: Array, b1: Array, b2: Array, b3: Array):
     T = (1.0/6.0)*array([3*t**2, 2*t, 1, 0])
     C = array([
-        [-1, 3, -3, 1], 
-        [3, -6, 3, 0], 
-        [-3, 0, 3, 0], 
+        [-1, 3, -3, 1],
+        [3, -6, 3, 0],
+        [-3, 0, 3, 0],
         [1, 4, 1, 0],
                ])
     B = stack([b0, b1, b2, b3], axis=0)
@@ -143,21 +143,21 @@ def main():
     # for continuity, we need to keep the 3 previous control points for each segment
     control_points = [
 
-        array([[-2, -2, -2], 
-               [-1, -1, -1], 
-               [0, 0, 0], 
+        array([[-2, -2, -2],
+               [-1, -1, -1],
+               [0, 0, 0],
                [1, 2, 3]], dtype=float32),
 
         # can add one control point
-        array([[-1, -1, -1], 
-               [0, 0, 0], 
-               [1, 2, 3], 
+        array([[-1, -1, -1],
+               [0, 0, 0],
+               [1, 2, 3],
                [5, 5, 6]], dtype=float32),
 
         # can add one control point
-        array([[0, 0, 0], 
-               [1, 2, 3], 
-               [5, 5, 6], 
+        array([[0, 0, 0],
+               [1, 2, 3],
+               [5, 5, 6],
                [7, 0, 5]], dtype=float32)
     ]
 

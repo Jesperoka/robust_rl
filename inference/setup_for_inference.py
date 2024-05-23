@@ -5,6 +5,7 @@ from pupil_apriltags import Detector
 from os.path import dirname, abspath, join
 from functools import partial
 from numpy import array as np_array, eye, ndarray, zeros, float32, random
+from cv2 import INTER_AREA, cvtColor, COLOR_GRAY2BGR, resize
 from cv2.typing import MatLike
 from mujoco import MjModel, mjtObj, mj_name2id # type: ignore[attr-defined]
 from mujoco.mjx import Model, put_model
@@ -25,6 +26,9 @@ from environments.reward_functions import curriculum_reward
 from environments.physical import ZeusDimensions
 from panda_py import Desk, Panda, PandaContext
 from panda_py.libfranka import Gripper, GripperState, RobotMode, RobotState
+from ultralytics.models import YOLO
+# from torch.jit import optimize_for_inference, script
+
 
 
 import pdb
@@ -33,13 +37,14 @@ import pdb
 # --------------------------------------------------------------------------------
 CURRENT_DIR = dirname(abspath(__file__))
 CHECKPOINT_DIR = join(CURRENT_DIR, "..", "trained_policies", "checkpoints")
-CHECKPOINT_FILE = "checkpoint_LATEST"
+CHECKPOINT_FILE = "checkpoint_LATEST_param_dicts__fc_64_rnn_16"
 MODEL_DIR = "mujoco_models"
 MODEL_FILE = "scene.xml"
 SHOP_FLOOR_IP = "10.0.0.2"  # hostname for the workshop floor, i.e. the Franka Emika Desk
 FILEPATH = abspath(join(dirname(__file__), "../", "sens.txt"))
 CTRL_FREQUENCY = 1000; assert CTRL_FREQUENCY == 1000
 MAX_RUNTIME = 30.0
+BALL_DETECTION_MODEL = "yolov8s-worldv2.pt"
 
 
 def setup_env():
@@ -67,7 +72,7 @@ def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatL
     pipe = rs.pipeline()
     cfg = rs.config()
     cfg.disable_all_streams()
-    cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 90)
+    cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 60)
     profile = pipe.start(cfg)
     device = profile.get_device()
     stereo_sensor = device.query_sensors()[0]
@@ -107,6 +112,53 @@ def setup_camera() -> tuple[rs.pipeline, tuple[float, float, float, float], MatL
 
     return pipe, cam_params, dist_coeffs, K, R, t, width, height, detector
 
+def setup_yolo():
+    model = YOLO(BALL_DETECTION_MODEL, task="detect")
+
+    model.set_classes([
+        "stressball", "baseball", "softball",
+        "sportsball", "white ball", "gray ball",
+        "grey ball", "small white ball", "small ball",
+        "tiny ball", "ball", "fast-moving ball",
+        "fastball", "moving ball", "blurry ball",
+        "large ball", "tiny ball", "toy ball",
+        "rubber ball", "industrial ball", "flying ball",
+        "bouncing ball", "rolling ball", "spinning ball",
+        "rotating ball", "floating ball", "hovering ball",
+        "sphere", "round ball", "orb",
+    ])
+
+    model.compile(mode="max-autotune-no-cudagraphs", backend="inductor")
+
+    crop_x_left = 152
+    crop_x_right = 152
+    crop_y_top = 0
+    crop_y_bottom = 32
+    reduction = 3
+    imgsz = (480-crop_y_bottom-crop_y_top-32*reduction, 848-crop_x_left-crop_x_right-32*reduction)
+
+    _model_forward = partial(
+        model.predict,
+        stream=False,
+        conf=0.03,
+        imgsz=imgsz,
+        show=False,
+        agnostic_nms=True,
+        max_det=1,
+        augment=True,
+        iou=0.4,
+        verbose=False
+    )
+
+
+    def model_forward(img):
+        img = img[crop_y_top:-crop_y_bottom, crop_x_left:-crop_x_right]
+        img = resize(img, imgsz[::-1], interpolation=INTER_AREA)
+        img = cvtColor(img, COLOR_GRAY2BGR)
+        return _model_forward(source=img)[0].boxes.xywh.squeeze().numpy()
+
+    return model_forward
+
 
 def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: str = CHECKPOINT_FILE):
     rng = PRNGKey(reproducibility_globals.PRNG_SEED)
@@ -126,9 +178,10 @@ def load_policies(env, rnn_hidden_size: int, rnn_fc_size: int, checkpoint_file: 
     apply_fns = tuple(jit(partial(ts.apply_fn, train=False), static_argnames=("train",)) for ts in actors.train_states) # type: ignore[attr-defined]
 
     # restore state dicts
+    print("Loading policies from: ", join(CHECKPOINT_DIR, CHECKPOINT_FILE))
     abstract_state = {"actor_"+str(i): device_get(ts.params) for i, ts in enumerate(actors.train_states)}
     restored_state = checkpointer.restore(
-            join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)),
+            join(CHECKPOINT_DIR, CHECKPOINT_FILE),
             args=args.StandardRestore(abstract_state)
     )
     # create actors with restored state dicts
@@ -165,7 +218,7 @@ def setup_panda() -> tuple[Panda, PandaContext, Gripper, Desk]:
     assert panda.get_state().robot_mode == RobotMode.kIdle, f"Cannot run while in robot_mode: {panda.get_state().robot_mode}, should be {RobotMode.kIdle}"
     panda.move_to_start()
 
-    print("Connection to Franka Hand")
+    print("Connecting to Franka Hand")
     gripper = Gripper(SHOP_FLOOR_IP)
     gripper.homing()
 
@@ -232,6 +285,7 @@ def observe_car(
     car_pos_offset_y: float = 0.0
     ) -> tuple[Array, Array, Array, Array]:
 
+    # TODO: rename _"ground"_ to _"floor"_
     # Compute the relative pose of the car with respect to the ground frame
     car_t_ground_frame = floor_R.T @ (car_t - floor_t)
     car_R_ground_frame = floor_R.T @ car_R
@@ -337,6 +391,38 @@ def concat_obs(
         p_goal,                                 # car goal
         relative_distances
     ], axis=0, dtype=float32)
+
+
+@partial(jit, static_argnames=("cam_params",))
+def ball_pos_cam_frame(
+    xywh: ndarray,
+    diameter=0.062,
+    cam_params=(
+        426.0619812011719,
+        426.0619812011719,
+        425.89910888671875,
+        232.21575927734375
+        )
+    ) -> Array:
+
+    fx, fy, cx, cy = cam_params
+    pixel_diameter = sum(xywh[2:])/2.0
+    x, y = xywh[0], xywh[1]
+    z = (diameter * fx) / (pixel_diameter + 1e-8)
+    x = (x - cx) * z / fx
+    y = (y - cy) * z / fy
+
+    return array([x, y, z])
+
+# TODO: finish this
+# def observe_ball(
+#     floor_R: Array,
+#     floor_t: Array,
+#     cam_params: tuple[float, ...],
+#     xyz_ball_cam_frame: ndarray,
+#     ) -> tuple[Array, Array]:
+#
+#     p_ball_floor_frame = floor_R @ (xyz_ball_cam_frame - floor_t)
 
 
 def observe(
