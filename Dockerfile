@@ -112,7 +112,11 @@ RUN pip install --upgrade --break-system-packages \
     orbax \
     chex \
     flax \
-    distrax
+    distrax \
+    ultralytics
+    # note I need to install the missing requirements for ultralytics as well
+
+RUN pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu -U --break-system-packages
 
 # Neovim for development (remove this if you're not planning on using neovim to develop on the lab computer)
 WORKDIR /
