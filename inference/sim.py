@@ -158,7 +158,7 @@ def rollout(
         reset_rng, rng_r = split_cpu(rng_r)
 
         if done: # Reset logic
-            rng_a, model, data, p_goal, b_prev, ball_released = environment_state 
+            # rng_a, model, data, p_goal, b_prev, ball_released = environment_state 
 
             actor_hidden_states = tuple(copy_cpu(hs) for hs in init_actor_hidden_states)
             _, environment_state, observation = reset_cpu(environment_state)

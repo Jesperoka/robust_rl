@@ -547,11 +547,11 @@ class A_to_B:
         def angle_velocity_modifier(theta: Array) -> Array:
             return 0.5 + 0.5*( jnp.abs( ( jnp.mod(theta, (pi/2.0)) ) - (pi/4.0) ) / (pi/4.0) )
 
-        def rotation_velocity_modifier(velocity: Array, omega: Array) -> Array:
-            return jnp.clip(velocity - jnp.abs(omega), 0.0, velocity)
-
-        velocity = angle_velocity_modifier(angle)*magnitude                                           
-        velocity = rotation_velocity_modifier(velocity, omega)
+        def rotational_velocity_modifier(magnitude: Array) -> Array:
+            return jnp.clip(0.1/(jnp.abs(magnitude) + 0.1), 0.0, 1)
+         
+        velocity = angle_velocity_modifier(angle)*magnitude
+        omega = rotational_velocity_modifier(magnitude)*omega
 
         velocity_x = velocity*jnp.cos(angle)
         velocity_y = velocity*jnp.sin(angle)

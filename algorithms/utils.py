@@ -234,7 +234,7 @@ class ActorRNN(Module):
         embedding = tanh(embedding)
 
         rnn_in = (embedding, dones)
-        hidden, embedding = SpecNorm(ScannedRNN(hidden_size=self.hidden_size))(hidden, rnn_in, update_stats=train)
+        hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
 
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
@@ -288,8 +288,8 @@ class CriticRNN(Module):
         embedding = LayerNorm()(embedding)
         embedding = tanh(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = SpecNorm(ScannedRNN(hidden_size=self.hidden_size))(hidden, rnn_in, update_stats=train)
+        # rnn_in = (embedding, dones)
+        # hidden, embedding = ScannedRNN(hidden_size=self.hidden_size)(hidden, rnn_in)
         
         # embedding = SpecNorm(Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0)))(embedding, update_stats=train)
         embedding = Dense(self.hidden_size, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)

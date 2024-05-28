@@ -334,13 +334,15 @@ def simple_curriculum_reward(
 def simple_car_reward_0(dc_goal: Array, q_car: Array, db_target: Array, qd_car: Array, p_goal: Array) -> Array:
     return  (
             -dc_goal + 10.0*close_enough(dc_goal) #- 25.0*close_enough(db_target) 
-            # + punish_car_outside_limits(q_car[0], q_car[1])
+            + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
+            + punish_car_outside_limits(q_car[0], q_car[1])
             )
 
 def simple_car_reward_1(dc_goal: Array, q_car: Array, db_target: Array, qd_car: Array, p_goal: Array) -> Array:
     return  (
             -dc_goal + 10.0*close_enough(dc_goal) #- 75.0*close_enough(db_target) 
-            # + punish_car_outside_limits(q_car[0], q_car[1])
+            + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
+            + punish_car_outside_limits(q_car[0], q_car[1])
             )
 # ----------------------------------------------------------------------------------------------------
 
