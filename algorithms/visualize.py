@@ -269,8 +269,9 @@ def main():
     current_dir = dirname(abspath(__file__))
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
-    CHECKPOINT_FILE = "checkpoint_LATEST"
+    # CHECKPOINT_FILE = "simple_curriculum"
     # CHECKPOINT_FILE = "zeus_rnn_32"
+    CHECKPOINT_FILE = "checkpoint_LATEST"
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -349,7 +350,7 @@ def main():
 
     lr = 3.0e-4
     max_grad_norm = 0.5
-    rnn_hidden_size = 16 
+    rnn_hidden_size = 32 
     rnn_fc_size = 64 
 
 
@@ -377,7 +378,7 @@ def main():
     with default_device(devices("cpu")[1]):
         print("Running rollout")
         # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, 0, max_steps=250)
-        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 20_000_000, max_steps=100)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 20_000_000, max_steps=500)
         print("Rollout finished with ", len(r_frames), " frames")
 
         from matplotlib.animation import FuncAnimation

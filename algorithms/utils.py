@@ -216,15 +216,15 @@ class ActorRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], train: bool) -> tuple[Array, Distribution]: # type: ignore[override]
         obs, dones = x
-        # obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
+        obs = clip(obs, -1000.0, 1000.0) # just safety against sim divergence
         # obs = symlog(obs)
 
         # Input Normalization
         running_stats = self.variable("vars", "running_stats", init_fn=RunningStats, mean_obs=zeros(obs.shape[-1]), welford_S=zeros(obs.shape[-1]), running_count=1, first=1)
-        # if train:
-        #     obs, running_stats.value = update_and_normalize_input(obs, running_stats.value) # type: ignore[assignment]
-        # else:
-        #     obs = normalize_input(obs, running_stats.value)                                 # type: ignore[assignment]
+        if train:
+            obs, running_stats.value = update_and_normalize_input(obs, running_stats.value) # type: ignore[assignment]
+        else:
+            obs = normalize_input(obs, running_stats.value)                                 # type: ignore[assignment]
 
         # obs = concatenate([obs[:, :, 0:3], obs[:, :, 15:18], obs[:, :, 30:]], axis=-1) # testing with filter
 
@@ -242,19 +242,19 @@ class ActorRNN(Module):
         embedding = tanh(embedding)
 
         # https://arxiv.org/pdf/2111.02202.pdf
-        # _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)) + 1.0
-        # _beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)) + 1.0
-        # alpha = clip(_alpha, 1.0, 1000.0)
-        # beta = clip(_beta, 1.0, 1000.0)
-        # policy = JointScaledBeta(alpha, beta, -1.0, 2.0)
+        _alpha = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)) + 1.0
+        _beta = softplus(Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)) + 1.0
+        alpha = clip(_alpha, 1.0, 1000.0)
+        beta = clip(_beta, 1.0, 1000.0)
+        policy = JointScaledBeta(alpha, beta, -1.0, 2.0)
 
-        mu = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.0))(embedding)
-        not_really_log_std = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.771))(embedding)    # State dependent log_std
-        std = softplus(not_really_log_std)
+        # mu = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.0))(embedding)
+        # not_really_log_std = Dense(self.action_dim, kernel_init=orthogonal(0.001), bias_init=constant(0.771))(embedding)    # State dependent log_std
+        # std = softplus(not_really_log_std)
         # log_std = self.param("log_std", init_fn=lambda rng: -0.693*ones(self.action_dim))                          # State independent log_std
         # std = exp(clip(log_std, -20.0, 0.1))
 
-        policy = Independent(TanhTransformedDistribution(Normal(mu, std)), reinterpreted_batch_ndims=1)
+        # policy = Independent(TanhTransformedDistribution(Normal(mu, std)), reinterpreted_batch_ndims=1)
 
         return hidden, policy 
 
@@ -271,15 +271,15 @@ class CriticRNN(Module):
     @compact
     def __call__(self, hidden: Array, x: tuple[Array, Array], train: bool) -> tuple[Array, Array]: # type: ignore[override]
         critic_obs, dones = x
-        # critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
+        critic_obs = clip(critic_obs, -1000.0, 1000.0) # just safety against sim divergence
         # critic_obs = symlog(critic_obs)
 
         # Input Normalization
         running_stats = self.variable("vars", "running_stats", init_fn=RunningStats, mean_obs=zeros(critic_obs.shape[-1]), welford_S=zeros(critic_obs.shape[-1]), running_count=1, first=1)
-        # if train:
-        #     critic_obs, running_stats.value = update_and_normalize_input(critic_obs, running_stats.value)   # type: ignore[assignment]
-        # else:
-        #     critic_obs = normalize_input(critic_obs, running_stats.value)                             # type: ignore[assignment]
+        if train:
+            critic_obs, running_stats.value = update_and_normalize_input(critic_obs, running_stats.value)   # type: ignore[assignment]
+        else:
+            critic_obs = normalize_input(critic_obs, running_stats.value)                             # type: ignore[assignment]
 
         # critic_obs = concatenate([critic_obs[:, :, 0:3], critic_obs[:, :, 15:18], critic_obs[:, :, 30:]], axis=-1) # testing with filter
 
@@ -297,6 +297,9 @@ class CriticRNN(Module):
         embedding = tanh(embedding)
 
         value = Dense(1, kernel_init=orthogonal(0.1), bias_init=constant(0.0))(embedding)
+
+        # idea: predict symlog values (since value normalization sometimes showed improvement in "What matters ..."
+        value = symexp(value)
         
         return hidden, squeeze(value, axis=-1) 
 
@@ -338,14 +341,19 @@ def initialize_actors(
         ) -> tuple[MultiActorRNN, tuple[Array,...]]:
 
     dummy_dones = zeros((1, num_envs))
-    dummy_actor_input = (zeros((1, num_envs, obs_size)), dummy_dones)
+    dummy_actor_inputs = tuple( 
+            ActorInput(
+                zeros((1, num_envs, obs_size)), 
+                dummy_dones
+            ) for i in range(num_agents)
+    )
     dummy_actor_hstates = tuple(ScannedRNN.initialize_carry(num_envs, rnn_hidden_size) for _ in range(num_agents))
     actor_networks = tuple(ActorRNN(action_dim=act_size, hidden_size=rnn_hidden_size, dense_size=rnn_fc_size) for act_size in act_sizes)
 
     actor_network_variable_dicts = tuple(
             network.init(rng, dummy_hstate, dummy_actor_input, train=False) 
-            for rng, network, dummy_hstate 
-            in zip(actor_rngs, actor_networks, dummy_actor_hstates)
+            for rng, network, dummy_hstate, dummy_actor_input
+            in zip(actor_rngs, actor_networks, dummy_actor_hstates, dummy_actor_inputs)
     )
 
     actors = MultiActorRNN(
@@ -374,12 +382,14 @@ def initialize_critics(
         ) -> tuple[MultiCriticRNN, tuple[Array,...]]:
 
     dummy_dones = zeros((1, num_envs))
-    # BUG: debuggin without opponent actions
-    dummy_critic_inputs = tuple(CriticInput(zeros((1, num_envs, obs_size)), dummy_dones) for _ in range(num_agents))
-    # dummy_critic_inputs = tuple(  
-    #         (zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
-    #         dummy_dones) for i in range(num_agents)
-    # ) # We pass in all **other** agents' actions to each critic
+    dummy_critic_inputs = tuple(  
+            CriticInput(
+                # zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
+                zeros((1, num_envs, obs_size)),
+                dummy_dones
+            ) 
+            for i in range(num_agents)
+    ) # We pass in all **other** agents' actions to each critic
     dummy_critic_hstates = tuple(ScannedRNN.initialize_carry(num_envs, rnn_hidden_size) for _ in range(num_agents))
     critic_networks = tuple(CriticRNN(hidden_size=rnn_hidden_size, dense_size=rnn_fc_size) for _ in range(num_agents))
 

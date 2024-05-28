@@ -40,7 +40,7 @@ from functools import partial
 from typing import Any, Callable, NamedTuple, TypeAlias 
 from environments.A_to_B_jax import A_to_B, EnvironmentState
 from algorithms.config import AlgorithmConfig
-from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, update_stats, l1_loss, l2_loss
+from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticInput, RunningStats, FakeTrainState, initialize_actors, initialize_critics, linear_schedule, squeeze_value, symlog, update_stats, l1_loss, l2_loss
 from algorithms.visualize import PlotMetrics
 from multiprocessing import Queue
 from multiprocessing.queues import Full
@@ -100,6 +100,7 @@ class MinibatchCarry(NamedTuple):
     actors:         MultiActorRNN
     critics:        MultiCriticRNN
     minibatch_rng:  KeyArray
+    kl_betas:       tuple[Array, ...]
 
 class Minibatch(NamedTuple):
     trajectory: Trajectory
@@ -114,10 +115,12 @@ class EpochCarry(NamedTuple):
     trajectory: Trajectory 
     advantages: tuple[Array, ...]
     targets:    tuple[Array, ...]
+    kl_betas:   tuple[Array, ...]
 
 class TrainStepCarry(NamedTuple):
     env_step_carry: EnvStepCarry
     step_count:     int
+    kl_betas:       tuple[Array, ...]
 
 class MinibatchMetrics(NamedTuple):
     actor_losses:   tuple[Array, ...]
@@ -139,7 +142,8 @@ def step_and_reset_if_done(
     next_env_state, observation, rewards, terminal, truncated = env.step(env_state, env_action, training_step)
 
     def reset(): 
-        env_state_with_randomized_model = EnvironmentState(env_state.rng, domain_randomized_mjx_model, env_state.mjx_data, env_state.p_goal, env_state.b_prev, env_state.ball_released)
+        # env_state_with_randomized_model = EnvironmentState(env_state.rng, domain_randomized_mjx_model, env_state.mjx_data, env_state.p_goal, env_state.b_prev, env_state.ball_released)
+        env_state_with_randomized_model = env_state # WARNING: domain randomization is disabled for now
         reset_env_state, reset_observation = env.reset(env_state_with_randomized_model)
         return reset_env_state, reset_observation, observation, rewards, terminal, truncated
 
@@ -193,53 +197,54 @@ def normalize_rewards(
     return rewards, returns, return_stats
 
 
-# BUG: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
-def bootstap_value_at_truncation(
-        env: A_to_B,
-        gamma: float,
-        critics: MultiCriticRNN,
-        critic_hidden_states: tuple[Array, ...],
-        terminal_observation: Array,
-        reset: Array,
-        rewards: tuple[Array, ...],
-        truncated: Array,
-        ) -> tuple[Array, ...]:
+# WARNING: bootstrappig causes value loss to diverge (because it's used in lambda-return estimates so initial poor values sprial out of control)
 
-    def _truncated_values() -> tuple[Array, Array]: 
+# def bootstap_value_at_truncation(
+#         env: A_to_B,
+#         gamma: float,
+#         critics: MultiCriticRNN,
+#         critic_hidden_states: tuple[Array, ...],
+#         terminal_observation: Array,
+#         reset: Array,
+#         rewards: tuple[Array, ...],
+#         truncated: Array,
+#         ) -> tuple[Array, ...]:
 
-        truncated_critic_inputs = tuple(
-                CriticInput(terminal_observation[jnp.newaxis, :], jnp.zeros_like(reset, dtype=jnp.bool)[jnp.newaxis, :])
-                for _ in range(env.num_agents)
-        )
+#     def _truncated_values() -> tuple[Array, Array]: 
 
-        _, truncated_values = zip(*jax.tree_map(
-            lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
-                critics.train_states,
-                critics.vars,
-                critic_hidden_states,
-                truncated_critic_inputs,
-                is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
-        ))
+#         truncated_critic_inputs = tuple(
+#                 CriticInput(terminal_observation[jnp.newaxis, :], jnp.zeros_like(reset, dtype=jnp.bool)[jnp.newaxis, :])
+#                 for _ in range(env.num_agents)
+#         )
 
-        return truncated_values
+#         _, truncated_values = zip(*jax.tree_map(
+#             lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
+#                 critics.train_states,
+#                 critics.vars,
+#                 critic_hidden_states,
+#                 truncated_critic_inputs,
+#                 is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
+#         ))
 
-    # If we truncate, then we need to compute the value of the observation that would have occured, and bootstrap the return estimate with that value via the reward.
-    terminal_values = jax.tree_map(
-        lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
-            (truncated, truncated),
-            _truncated_values(),
-            is_leaf=lambda x: not isinstance(x, tuple)
-    ) # ^wish there was a better way to do this
+#         return truncated_values
 
-    # Bootstrap value at truncations (this will add zero if there was no truncation)
-    bootstrapped_rewards = jax.tree_map(
-        lambda reward, terminal_value: reward + gamma*terminal_value,
-            rewards, 
-            terminal_values,
-            is_leaf=lambda x: not isinstance(x, tuple)
-    ) 
+#     # If we truncate, then we need to compute the value of the observation that would have occured, and bootstrap the return estimate with that value via the reward.
+#     terminal_values = jax.tree_map(
+#         lambda truncated, value: jnp.where(truncated, value, jnp.zeros_like(value)),
+#             (truncated, truncated),
+#             _truncated_values(),
+#             is_leaf=lambda x: not isinstance(x, tuple)
+#     ) # ^wish there was a better way to do this
 
-    return bootstrapped_rewards
+#     # Bootstrap value at truncations (this will add zero if there was no truncation)
+#     bootstrapped_rewards = jax.tree_map(
+#         lambda reward, terminal_value: reward + gamma*terminal_value,
+#             rewards, 
+#             terminal_values,
+#             is_leaf=lambda x: not isinstance(x, tuple)
+#     ) 
+
+#     return bootstrapped_rewards
 
 
 def env_step(
@@ -254,8 +259,10 @@ def env_step(
     # Gather inputs to the actors
     reset = jnp.logical_or(carry.terminal, carry.truncated)
     actor_inputs = tuple(
-            ActorInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :]) 
-            for _ in range(env.num_agents)
+            ActorInput(
+                carry.observation[jnp.newaxis, :],
+                reset[jnp.newaxis, :]) 
+            for i in range(env.num_agents)
     )
 
     # Actor forward pass
@@ -274,16 +281,19 @@ def env_step(
     environment_actions = jnp.concatenate(actions, axis=-1)
 
     # Gather inputs to the critics
-    # BUG: debugging without opponent actions
-    critic_inputs = tuple(
-            CriticInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :])
-            for _ in range(env.num_agents)
-    )
-    # critic_inputs = tuple( # NOTE: trying out with current opponent action as opposed to previous (change: carry.actions to actions)
-    #         CriticInput(jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
-    #         carry.done[jnp.newaxis, :]) 
-    #         for i in range(env.num_agents)
+    # WITHOUT OPPNENT ACTIONS
+    # critic_inputs = tuple(
+    #         CriticInput(carry.observation[jnp.newaxis, :], reset[jnp.newaxis, :])
+    #         for _ in range(env.num_agents)
     # )
+    critic_inputs = tuple(
+            CriticInput(
+                # jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
+                carry.observation[jnp.newaxis, :],
+                reset[jnp.newaxis, :]
+            ) 
+            for i in range(env.num_agents)
+    )
 
     # Critic forward pass
     critic_hidden_states, values = zip(*jax.tree_map(
@@ -295,8 +305,9 @@ def env_step(
             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
     
-    # Domain randomization
-    domain_randomized_mjx_model = jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
+    # Domain randomization # BUG: turning off domain randomization
+    # domain_randomized_mjx_model = jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
+    domain_randomized_mjx_model = carry.environment_state.mjx_model # jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
 
     # Step environment
     environment_state, observation, terminal_observation, rewards, terminal, truncated = jax.vmap(
@@ -305,7 +316,7 @@ def env_step(
     )(env, carry.environment_state, environment_actions, domain_randomized_mjx_model, carry.training_step)
 
     # Normalize rewards (based on return standard deviations) 
-    # WARNING: renaming output to disable
+    # WARNING: for now just renaming output to disable
     _rewards, returns, return_stats = normalize_rewards(rewards, terminal, truncated, carry.returns, carry.return_stats, gamma)
     # rewards = symlog(rewards)
 
@@ -378,7 +389,7 @@ def generalized_advantage_estimate(
 
 
 def actor_loss(
-        clip_eps: float, ent_coef: float,  # partial() these in make_train()
+        clip_eps: float, ent_coef: float, target_kl: float,  # partial() these in make_train()
         params: VariableDict,
         vars: VariableDict,
         apply_fn: Callable[[VariableDict, Array, ActorInput], tuple[Array, Distribution]],
@@ -389,33 +400,44 @@ def actor_loss(
         minibatch_terminal: Array,
         minibatch_truncated: Array,
         minibatch_hidden_state: Array, 
+        kl_beta: Array,
         entropy_rng: KeyArray,
         ) -> tuple[Array, Any]:
 
-    def loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng):
-        ratio = jnp.exp(log_prob - minibatch_log_prob)
+    def loss(gae, log_prob, minibatch_log_prob, policy, kl_beta, entropy_rng):
+        log_ratio = log_prob - minibatch_log_prob
+        ratio = jnp.exp(log_ratio)
         clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+        approx_kl = ((ratio - 1) - log_ratio).mean()
 
         entropy = policy.entropy(seed=entropy_rng).mean()
-        actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
-        entropy_regularized_actor_utility = actor_utility + ent_coef * entropy
-    
-        actor_loss = -entropy_regularized_actor_utility
 
-        return actor_loss, entropy
+        # actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
+        actor_utility = (ratio*gae).mean()
+        kl_beta = jnp.where(approx_kl > target_kl, kl_beta*1.5, kl_beta/1.5)
+
+        entropy_regularized_actor_utility = actor_utility + ent_coef * entropy
+        kl_penalized_actor_utility = entropy_regularized_actor_utility - kl_beta * approx_kl
+    
+        actor_loss = -kl_penalized_actor_utility
+
+        return actor_loss, (entropy, kl_beta)
 
     minibatch_reset = jnp.logical_or(minibatch_terminal, minibatch_truncated)
-    input = ActorInput(minibatch_observation, minibatch_reset) 
+    input = ActorInput(
+            minibatch_observation,
+            minibatch_reset
+            ) 
 
     (_, policy), updated_vars = apply_fn({"params": params, "vars": vars}, minibatch_hidden_state[0], input, train=True, mutable="vars") # type: ignore[arg-defined]
     log_prob = policy.log_prob(minibatch_action)    # type: ignore[attr-defined]
 
     gae = (minibatch_gae - minibatch_gae.mean()) / (minibatch_gae.std() + 1e-8)
 
-    actor_loss, entropy = loss(gae, log_prob, minibatch_log_prob, policy, entropy_rng)
-    actor_loss = actor_loss + l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params)) # WARNING: l2: this penalizes bias as well
+    actor_loss, (entropy, kl_beta) = loss(gae, log_prob, minibatch_log_prob, policy, kl_beta, entropy_rng)
+    actor_loss = actor_loss #+ l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params)) # WARNING: l2: this penalizes bias as well
 
-    return actor_loss, (entropy, updated_vars["vars"])
+    return actor_loss, (entropy, updated_vars["vars"], kl_beta)
 
 
 def critic_loss(
@@ -440,20 +462,26 @@ def critic_loss(
         # value_losses = 0.5 * jnp.maximum(value_losses_clipped, value_losses_unclipped).mean()
 
         ### Without Value clipping
-        value_losses = jnp.square(value - minibatch_target).mean()
+        # value_losses = jnp.square(value - minibatch_target).mean()
+
+        ### Symlog Value without clipping
+        value_losses = jnp.square(symlog(value) - symlog(minibatch_target)).mean()
 
         return vf_coef*value_losses
     
-    # BUG: debugging without opponent actions
     minibatch_reset = jnp.logical_or(minibatch_terminal, minibatch_truncated)
-    input = CriticInput(minibatch_observation, minibatch_reset)
-    # input = CriticInput(jnp.concatenate([minibatch_observation, minibatch_other_action], axis=-1), minibatch_done)
+    # input = CriticInput(minibatch_observation, minibatch_reset)
+    input = CriticInput(
+            # jnp.concatenate([minibatch_observation, minibatch_other_action], axis=-1), 
+            minibatch_observation,
+            minibatch_reset
+    )
 
     (_, value), updated_vars = apply_fn({"params": params, "vars": vars}, minibatch_hidden_state[0], input, train=True, mutable="vars") # type: ignore[arg-defined]
     value = value.squeeze()
 
     critic_loss = loss(value, minibatch_value, minibatch_target)
-    critic_loss = critic_loss + l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params))
+    critic_loss = critic_loss #+ l1_loss(params["Dense_0"]["kernel"]) #+ sum(l2_loss(w) for w in jax.tree_leaves(params))
 
     return critic_loss, updated_vars["vars"]
 
@@ -471,7 +499,7 @@ def gradient_minibatch_step(
     actor_grad_fn = jax.value_and_grad(actor_loss_fn, argnums=0, has_aux=True)
 
     actor_loss_out, actor_grads = zip(*jax.tree_map(
-        lambda ts, vars, adv, obs, act, log_p, term, trunc, hs, rng: actor_grad_fn(ts.params, vars, ts.apply_fn, adv, obs, act, log_p, term, trunc, hs, rng),
+        lambda ts, vars, adv, obs, act, log_p, term, trunc, hs, beta, rng: actor_grad_fn(ts.params, vars, ts.apply_fn, adv, obs, act, log_p, term, trunc, hs, beta, rng),
             carry.actors.train_states,
             carry.actors.vars,
             minibatch.advantages,
@@ -481,11 +509,12 @@ def gradient_minibatch_step(
             (minibatch.trajectory.terminal, minibatch.trajectory.terminal),
             (minibatch.trajectory.truncated, minibatch.trajectory.truncated),
             minibatch.trajectory.actor_hidden_states, 
+            carry.kl_betas,
             entropy_rngs,
             is_leaf=lambda x: not isinstance(x, tuple)
     ))
     actor_losses, aux = zip(*actor_loss_out)
-    entropies, actor_vars = zip(*aux)
+    entropies, actor_vars, kl_betas = zip(*aux)
 
     carry.actors.train_states, carry.actors.vars = zip(*jax.tree_map(
         lambda ts, vars, grad: (ts.apply_gradients(grads=grad), vars), 
@@ -503,7 +532,7 @@ def gradient_minibatch_step(
     critic_grad_fn = jax.value_and_grad(critic_loss_fn, argnums=0, has_aux=True)
 
     critic_loss_out, critic_grads = zip(*jax.tree_map(
-        lambda ts, vars, trgt, obs, act, val, term, trunc, hs: critic_grad_fn(ts.params, vars, ts.apply_fn, trgt, obs, act, val, term, trunc, hs),
+        lambda ts, vars, trgt, obs, o_act, val, term, trunc, hs: critic_grad_fn(ts.params, vars, ts.apply_fn, trgt, obs, o_act, val, term, trunc, hs),
             carry.critics.train_states,
             carry.critics.vars,
             minibatch.targets,
@@ -531,7 +560,12 @@ def gradient_minibatch_step(
         entropies=entropies,
     )
 
-    carry = MinibatchCarry(carry.actors, carry.critics, minibatch_rng)
+    carry = MinibatchCarry(
+            carry.actors, 
+            carry.critics, 
+            minibatch_rng,
+            kl_betas
+    )
     
     return carry, minibatch_metrics
 
@@ -561,16 +595,22 @@ def gradient_epoch_step(
 
     batch = EpochBatch(carry.trajectory, carry.advantages, carry.targets)
     minibatches = shuffled_minibatches_fn(batch, epoch_rng)
-    minibatch_carry = MinibatchCarry(carry.actors, carry.critics, minibatch_rng)
+    minibatch_carry = MinibatchCarry(
+            carry.actors, 
+            carry.critics, 
+            minibatch_rng,
+            carry.kl_betas
+    )
 
     minibatch_final, minibatch_metrics = jax.lax.scan(gradient_minibatch_step_fn, minibatch_carry, minibatches, unroll=False)
 
     carry = EpochCarry(
-            minibatch_final.actors, 
-            minibatch_final.critics,
-            carry.trajectory, 
-            carry.advantages, 
-            carry.targets
+            actors=minibatch_final.actors, 
+            critics=minibatch_final.critics,
+            trajectory=carry.trajectory, 
+            advantages=carry.advantages, 
+            targets=carry.targets,
+            kl_betas=minibatch_final.kl_betas
     )
 
     return carry, minibatch_metrics 
@@ -592,17 +632,15 @@ def train_step(
 
     env_final, trajectory = jax.lax.scan(env_step_fn, carry.env_step_carry, step_rngs, num_env_steps, unroll=False)
     
-    # BUG: debugging without opponent action
     final_reset = jnp.logical_or(env_final.terminal, env_final.truncated)
     critic_inputs = tuple(
-            CriticInput(env_final.observation[jnp.newaxis, :], final_reset[jnp.newaxis, :])
-            for _ in range(num_agents)
+            CriticInput(
+                # jnp.concatenate([env_final.observation, *[action for j, action in enumerate(env_final.actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
+                env_final.observation[jnp.newaxis, :],
+                final_reset[jnp.newaxis, :]
+            ) 
+            for i in range(num_agents)
     )
-    # critic_inputs = tuple(
-    #         # CriticInput(jnp.concatenate([env_final.observation, *[action for j, action in enumerate(env_final.actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
-    #         env_final.done[jnp.newaxis, :]) 
-    #         for i in range(num_agents)
-    # )
 
     _, env_final_values = zip(*jax.tree_map(
         lambda ts, vars, hs, ins: squeeze_value(ts.apply_fn)({"params": ts.params, "vars": vars}, hs, ins, train=False),
@@ -613,7 +651,6 @@ def train_step(
             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
 
-    # NOTE: If next_terminal is correctly recorded in the trajectory, then we should not need to mask the final values here (will be handled in GAE)
     env_final_values = jax.tree_map(lambda value: jnp.where(env_final.terminal, jnp.zeros_like(value), value), env_final_values)
 
     advantages, targets = zip(*jax.tree_map(
@@ -630,7 +667,8 @@ def train_step(
             critics=env_final.critics, 
             trajectory=trajectory, 
             advantages=advantages, 
-            targets=targets
+            targets=targets,
+            kl_betas=carry.kl_betas
     )
 
     epoch_final, epoch_metrics = jax.lax.scan(gradient_epoch_step_fn, epoch_carry, epoch_rngs, num_gradient_epochs, unroll=False)
@@ -658,7 +696,8 @@ def train_step(
     )
     carry = TrainStepCarry(
             env_step_carry=updated_env_step_carry, 
-            step_count=carry.step_count + 1
+            step_count=carry.step_count + 1,
+            kl_betas=epoch_final.kl_betas
     )
 
     def callback(args):
@@ -736,7 +775,8 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
     )
     multi_actor_loss_fn = partial(actor_loss, 
             config.clip_eps, 
-            config.ent_coef
+            config.ent_coef,
+            config.target_kl
     )
     multi_critic_loss_fn = partial(critic_loss, 
             config.clip_eps, 
@@ -792,7 +832,9 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
         # Init the environment and carries for the scanned training loop
         # -------------------------------------------------------------------------------------------------------
-        mjx_model_batch = jax.vmap(env.randomize_domain, in_axes=0)(reset_rngs)
+        # mjx_model_batch = jax.vmap(env.randomize_domain, in_axes=0)(reset_rngs) # BUG: THIS MEANS THEY'RE RANDOMIZED FOREVER IF I DON'T RE-INITIALIZE
+        mjx_model_batch = jax.vmap(lambda: env.mjx_model, axis_size=config.num_envs, out_axes=0)() # WARNING: no domain randomization
+
         mjx_data_batch = jax.vmap(env.mjx_data.replace, axis_size=config.num_envs, out_axes=0)()
         _p_goal = jnp.zeros((config.num_envs, 2))
         _b_prev = (jnp.zeros((config.num_envs, env.nq_arm)), jnp.zeros((config.num_envs, env.nq_arm)), jnp.zeros((config.num_envs, env.nq_arm)))
@@ -816,8 +858,11 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
         init_reset = jnp.logical_or(init_terminal, init_truncated)
 
         init_actor_inputs = tuple(
-                ActorInput(init_observations[jnp.newaxis, :], init_reset[jnp.newaxis, :]) 
-                for _ in range(env.num_agents)
+                ActorInput(
+                    init_observations[jnp.newaxis, :], 
+                    init_reset[jnp.newaxis, :]
+                    ) 
+                for i in range(env.num_agents)
         )
 
         _, init_policies = zip(*jax.tree_map(
@@ -848,7 +893,8 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
         train_step_carry = TrainStepCarry(
                 env_step_carry=init_env_step_carry, 
-                step_count=0
+                step_count=0,
+                kl_betas=config.kl_betas
         )
         # -------------------------------------------------------------------------------------------------------
 
@@ -874,7 +920,7 @@ def main():
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller
+    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller, minimal_actions_controller, arm_fixed_pose, gripper_always_grip
     from algorithms.visualize import data_displayer, rollout_generator
     from algorithms.utils import FakeTrainState
     from multiprocessing import Process, set_start_method
@@ -905,13 +951,16 @@ def main():
     minibatch_size = 64 
 
     config: AlgorithmConfig = AlgorithmConfig(
-        lr              = 1.0e-3, #3.0e-4,
+        lr              = 1.0e-3, #3.0e-4, #1.0e-3
         num_envs        = num_envs,
-        num_env_steps   = 5,
+        num_env_steps   = 3,
         # total_timesteps = 419_430_400,
-        total_timesteps = 209_715_200,
+        # total_timesteps = 209_715_200,
         # total_timesteps = 104_857_600,
         # total_timesteps = int(2*20_971_520),
+        total_timesteps = 20_971_520,
+        # total_timesteps = 10_485_760,
+        # total_timesteps = 4_194_304,
         # total_timesteps = 2_097_152,
         # total_timesteps = 2_097_152 // 16,
         update_epochs   = 5,
@@ -924,8 +973,10 @@ def main():
         vf_coef         = 0.5,
         max_grad_norm   = 0.5,
         env_name        = "A_to_B_jax",
-        rnn_hidden_size = 16, # 32
-        rnn_fc_size     = 64 
+        rnn_hidden_size = 8, # 32
+        rnn_fc_size     = 64,
+        kl_betas         = (1.0, 1.0)
+
     )
     config.num_actors = config.num_envs # env.num_agents * config.num_envs
     config.num_updates = config.total_timesteps // config.num_env_steps // config.num_envs
@@ -934,12 +985,31 @@ def main():
     options: EnvironmentOptions = EnvironmentOptions(
         # reward_fn           = partial(curriculum_reward, config.num_updates),
         reward_fn           = partial(simple_curriculum_reward, config.num_updates),
-        # arm_ctrl            = ,
-        arm_low_level_ctrl  = arm_spline_tracking_controller,
-        gripper_ctrl        = gripper_ctrl,
+        arm_ctrl            = arm_fixed_pose,
+        gripper_ctrl        = gripper_always_grip,
+        # arm_ctrl            = minimal_actions_controller,
+        # arm_act_min         = jnp.concatenate([jnp.array([-1.58]), PandaLimits().q_dot_min[3][jnp.newaxis], PandaLimits().q_dot_min[5][jnp.newaxis]]),
+        # arm_act_max         = jnp.concatenate([jnp.array([1.58]), PandaLimits().q_dot_max[3][jnp.newaxis], PandaLimits().q_dot_max[5][jnp.newaxis]]),
+        # arm_low_level_ctrl  = arm_spline_tracking_controller,
+        # gripper_ctrl        = gripper_ctrl,
         goal_radius         = 0.05,
         steps_per_ctrl      = 20,
         time_limit          = 3.0,
+
+        timestep_noise      = 0.0,
+        impratio_noise      = 0.0,
+        tolerance_noise     = 0.0,
+        ls_tolerance_noise  = 0.0,
+        wind_noise          = 0.0,
+        density_noise       = 0.0,
+        viscosity_noise     = 0.0,
+        gravity_noise       = 0.0,
+        actuator_gain_noise = 0.0,
+        actuator_bias_noise = 0.0,
+        actuator_dyn_noise  = 0.0,
+        observation_noise   = 0.0,
+        ctrl_noise          = 0.0,
+
     )
 
     print("\n\nenvironment options:\n\n")
@@ -1004,7 +1074,7 @@ def main():
     sequence_length = 20
     num_envs = 1
     obs_size = env.obs_space.sample().shape[0]
-    act_sizes = (space.sample().shape[0] for space in env.act_spaces)
+    act_sizes = tuple(space.sample().shape[0] for space in env.act_spaces)
     rngs = tuple(jax.random.split(rng))
 
     actors, actor_hidden_states = initialize_actors(rngs, num_envs, env.num_agents, obs_size, act_sizes, config.lr, config.max_grad_norm, config.rnn_hidden_size, config.rnn_fc_size)
@@ -1023,8 +1093,10 @@ def main():
     print("\n..actors restored.\n\n")
 
     inputs = tuple(
-            ActorInput(jnp.zeros((sequence_length, num_envs, env.obs_space.sample().shape[0])), jnp.zeros((sequence_length, num_envs))) 
-            for _ in range(env.num_agents)
+            ActorInput(
+                jnp.zeros((sequence_length, num_envs, env.obs_space.sample().shape[0])),
+                jnp.zeros((sequence_length, num_envs))) 
+            for i in range(env.num_agents)
     )
     
     _, policies = zip(*jax.tree_map(
