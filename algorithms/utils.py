@@ -384,8 +384,8 @@ def initialize_critics(
     dummy_dones = zeros((1, num_envs))
     dummy_critic_inputs = tuple(  
             CriticInput(
-                # zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
-                zeros((1, num_envs, obs_size)),
+                zeros((1, num_envs, obs_size + sum([act_size for j, act_size in enumerate(act_sizes) if j != i]))),
+                # zeros((1, num_envs, obs_size)),
                 dummy_dones
             ) 
             for i in range(num_agents)

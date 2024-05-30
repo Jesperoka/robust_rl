@@ -4,7 +4,7 @@
 from numpy.random import uniform
 from copy import copy
 from jax import Array, debug
-from jax.numpy import array, concatenate, float32, clip, diag, logical_and, ones, stack, zeros_like, where, abs as jnp_abs, min as jnp_min
+from jax.numpy import array, concatenate, float32, clip, diag, logical_and, ones, stack, zeros, zeros_like, where, abs as jnp_abs, min as jnp_min
 from jax.numpy.linalg import norm
 from jax.lax import cond
 from environments.options import ObsDecodeFuncSig
@@ -149,7 +149,7 @@ def d_dt_cubic_b_spline(t: Array, b0: Array, b1: Array, b2: Array, b3: Array):
     return T @ C @ B
 
 
-def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array, action: Array):
+def minimal_actions_low_level_controller(q_arm: Array, qd_arm: Array, qdd_arm: Array, action: Array) -> Array:
     # we assume action has 3 elements
     j0_angle = action[0]
     j3_vel = action[1]
@@ -159,13 +159,8 @@ def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array
     q_min = PandaLimits().q_min
     q_max = PandaLimits().q_max
 
-    (_, q_arm, _, _, _, qd_arm, *_) = decode_obs(observation)
-
-    kp_pos = array([200.0, 200.0, 200.0, 0.0, 80.0, 0.0, 80.0], dtype=float32)
-    kd_pos = array([5.0, 5.0, 5.0, 0.0, 5.0, 0.0, 5.0], dtype=float32)
-
-    kp_vel = array([50.0, 50.0, 50.0, 20.0, 20.0, 20.0, 10.0], dtype=float32)
-    # kd_vel = array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.1], dtype=float32)
+    kp_pos = array([200.0, 100.0, 200.0, 0.0, 100.0, 0.0, 100.0], dtype=float32)
+    kd_pos = array([20.0, 20.0, 20.0, 0.0, 20.0, 0.0, 20.0], dtype=float32)
     
     position_margins = array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1], dtype=float32)
 
@@ -175,14 +170,16 @@ def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array
     j3_safe = logical_and(q_arm[3] > (q_min[3] + position_margins[3]), q_arm[3] < (q_max[3] - position_margins[3]))
     j5_safe = logical_and(q_arm[5] > (q_min[5] + position_margins[5]), q_arm[5] < (q_max[5] - position_margins[5]))
 
-    j3_dampening = 2.5
-    j5_dampening = 1.0
+    j3_stiffness = 10.0
+    j5_stiffness = 10.0
+    j3_dampening = 0.01
+    j5_dampening = 0.01
 
     j3_deviation_from_start = jnp_abs(q_arm[3] - q[3])    
     j5_deviation_from_start = jnp_abs(q_arm[5] - q[5])
     
-    j3_policy_torque = kp_vel[3]*(j3_vel - qd_arm[3]) - j3_dampening*j3_deviation_from_start
-    j5_policy_torque = kp_vel[5]*(j5_vel - qd_arm[5]) - j5_dampening*j5_deviation_from_start
+    j3_policy_torque = j3_stiffness*(j3_vel - qd_arm[3]) - j3_dampening*qdd_arm[3] #- j3_dampening*j3_deviation_from_start
+    j5_policy_torque = j5_stiffness*(j5_vel - qd_arm[5]) - j5_dampening*qdd_arm[5]  #- j5_dampening*j5_deviation_from_start
 
     j3_torque = where(j3_safe, j3_policy_torque, j3_safety_torque) 
     j5_torque = where(j5_safe, j5_policy_torque, j5_safety_torque)
@@ -192,6 +189,19 @@ def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array
     return clip(tau, PandaLimits().tau_min, PandaLimits().tau_max)
 
 
+def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array, action: Array):
+
+    (_, q_arm, _, _, _, qd_arm, *_) = decode_obs(observation)
+
+    return zeros(7)    
+
+    # return clip(tau, PandaLimits().tau_min, PandaLimits().tau_max)
+
+
+def minimal_pos_controller(decode_obs: ObsDecodeFuncSig,  observation: Array, action: Array):
+    q_start = PandaLimits().q_start
+    # debug.print("actions: {a0}, {a1}, {a2}", a0=action[0], a1=action[1], a2=action[2])
+    return q_start.at[0].set(action[0]).at[3].set(action[1]).at[5].set(action[2])
 
 
 def main():

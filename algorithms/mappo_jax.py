@@ -142,8 +142,8 @@ def step_and_reset_if_done(
     next_env_state, observation, rewards, terminal, truncated = env.step(env_state, env_action, training_step)
 
     def reset(): 
-        # env_state_with_randomized_model = EnvironmentState(env_state.rng, domain_randomized_mjx_model, env_state.mjx_data, env_state.p_goal, env_state.b_prev, env_state.ball_released)
-        env_state_with_randomized_model = env_state # WARNING: domain randomization is disabled for now
+        env_state_with_randomized_model = EnvironmentState(env_state.rng, domain_randomized_mjx_model, env_state.mjx_data, env_state.p_goal, env_state.b_prev, env_state.ball_released)
+        # env_state_with_randomized_model = env_state # no domain randomization 
         reset_env_state, reset_observation = env.reset(env_state_with_randomized_model)
         return reset_env_state, reset_observation, observation, rewards, terminal, truncated
 
@@ -288,8 +288,8 @@ def env_step(
     # )
     critic_inputs = tuple(
             CriticInput(
-                # jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
-                carry.observation[jnp.newaxis, :],
+                jnp.concatenate([carry.observation, *[action for j, action in enumerate(actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
+                # carry.observation[jnp.newaxis, :],
                 reset[jnp.newaxis, :]
             ) 
             for i in range(env.num_agents)
@@ -305,9 +305,9 @@ def env_step(
             is_leaf=lambda x: not isinstance(x, tuple) or isinstance(x, CriticInput)
     ))
     
-    # Domain randomization # BUG: turning off domain randomization
-    # domain_randomized_mjx_model = jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
-    domain_randomized_mjx_model = carry.environment_state.mjx_model # jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
+    # Domain randomization
+    domain_randomized_mjx_model = jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
+    # domain_randomized_mjx_model = carry.environment_state.mjx_model # jax.vmap(env.randomize_domain, in_axes=0)(domain_rand_rng)
 
     # Step environment
     environment_state, observation, terminal_observation, rewards, terminal, truncated = jax.vmap(
@@ -472,8 +472,8 @@ def critic_loss(
     minibatch_reset = jnp.logical_or(minibatch_terminal, minibatch_truncated)
     # input = CriticInput(minibatch_observation, minibatch_reset)
     input = CriticInput(
-            # jnp.concatenate([minibatch_observation, minibatch_other_action], axis=-1), 
-            minibatch_observation,
+            jnp.concatenate([minibatch_observation, minibatch_other_action], axis=-1), 
+            # minibatch_observation,
             minibatch_reset
     )
 
@@ -635,8 +635,8 @@ def train_step(
     final_reset = jnp.logical_or(env_final.terminal, env_final.truncated)
     critic_inputs = tuple(
             CriticInput(
-                # jnp.concatenate([env_final.observation, *[action for j, action in enumerate(env_final.actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
-                env_final.observation[jnp.newaxis, :],
+                jnp.concatenate([env_final.observation, *[action for j, action in enumerate(env_final.actions) if j != i] ], axis=-1)[jnp.newaxis, :], 
+                # env_final.observation[jnp.newaxis, :],
                 final_reset[jnp.newaxis, :]
             ) 
             for i in range(num_agents)
@@ -832,8 +832,8 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
 
         # Init the environment and carries for the scanned training loop
         # -------------------------------------------------------------------------------------------------------
-        # mjx_model_batch = jax.vmap(env.randomize_domain, in_axes=0)(reset_rngs) # BUG: THIS MEANS THEY'RE RANDOMIZED FOREVER IF I DON'T RE-INITIALIZE
-        mjx_model_batch = jax.vmap(lambda: env.mjx_model, axis_size=config.num_envs, out_axes=0)() # WARNING: no domain randomization
+        mjx_model_batch = jax.vmap(env.randomize_domain, in_axes=0)(reset_rngs) # domain randomization
+        # mjx_model_batch = jax.vmap(lambda: env.mjx_model, axis_size=config.num_envs, out_axes=0)() # no domain randomization
 
         mjx_data_batch = jax.vmap(env.mjx_data.replace, axis_size=config.num_envs, out_axes=0)()
         _p_goal = jnp.zeros((config.num_envs, 2))
@@ -920,7 +920,7 @@ def main():
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
     from algorithms.config import AlgorithmConfig 
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller, minimal_actions_controller, arm_fixed_pose, gripper_always_grip
+    from inference.controllers import gripper_ctrl, arm_spline_tracking_controller, minimal_actions_controller, arm_fixed_pose, gripper_always_grip, minimal_pos_controller
     from algorithms.visualize import data_displayer, rollout_generator
     from algorithms.utils import FakeTrainState
     from multiprocessing import Process, set_start_method
@@ -956,9 +956,9 @@ def main():
         num_env_steps   = 3,
         # total_timesteps = 419_430_400,
         # total_timesteps = 209_715_200,
-        # total_timesteps = 104_857_600,
+        total_timesteps = 104_857_600,
         # total_timesteps = int(2*20_971_520),
-        total_timesteps = 20_971_520,
+        # total_timesteps = 20_971_520,
         # total_timesteps = 10_485_760,
         # total_timesteps = 4_194_304,
         # total_timesteps = 2_097_152,
@@ -976,7 +976,6 @@ def main():
         rnn_hidden_size = 8, # 32
         rnn_fc_size     = 64,
         kl_betas         = (1.0, 1.0)
-
     )
     config.num_actors = config.num_envs # env.num_agents * config.num_envs
     config.num_updates = config.total_timesteps // config.num_env_steps // config.num_envs
@@ -985,30 +984,32 @@ def main():
     options: EnvironmentOptions = EnvironmentOptions(
         # reward_fn           = partial(curriculum_reward, config.num_updates),
         reward_fn           = partial(simple_curriculum_reward, config.num_updates),
-        arm_ctrl            = arm_fixed_pose,
-        gripper_ctrl        = gripper_always_grip,
-        # arm_ctrl            = minimal_actions_controller,
-        # arm_act_min         = jnp.concatenate([jnp.array([-1.58]), PandaLimits().q_dot_min[3][jnp.newaxis], PandaLimits().q_dot_min[5][jnp.newaxis]]),
-        # arm_act_max         = jnp.concatenate([jnp.array([1.58]), PandaLimits().q_dot_max[3][jnp.newaxis], PandaLimits().q_dot_max[5][jnp.newaxis]]),
+        # arm_ctrl            = arm_fixed_pose,
+        # gripper_ctrl        = gripper_always_grip,
+        arm_ctrl            = minimal_pos_controller,
+        arm_act_min         = jnp.array([-2.0, -2.0, -2.5]),
+        arm_act_max         = jnp.array([2.0, 2.0, 2.5]),
+        car_act_min         = ZeusLimits.a_min.at[2].set(-0.75),
+        car_act_max         = ZeusLimits.a_max.at[0].set(0.75).at[2].set(0.75),
         # arm_low_level_ctrl  = arm_spline_tracking_controller,
-        # gripper_ctrl        = gripper_ctrl,
+        gripper_ctrl        = gripper_ctrl,
         goal_radius         = 0.05,
         steps_per_ctrl      = 20,
         time_limit          = 3.0,
 
-        timestep_noise      = 0.0,
-        impratio_noise      = 0.0,
-        tolerance_noise     = 0.0,
-        ls_tolerance_noise  = 0.0,
-        wind_noise          = 0.0,
-        density_noise       = 0.0,
-        viscosity_noise     = 0.0,
-        gravity_noise       = 0.0,
-        actuator_gain_noise = 0.0,
-        actuator_bias_noise = 0.0,
-        actuator_dyn_noise  = 0.0,
-        observation_noise   = 0.0,
-        ctrl_noise          = 0.0,
+        # timestep_noise      = 0.0,
+        # impratio_noise      = 0.0,
+        # tolerance_noise     = 0.0,
+        # ls_tolerance_noise  = 0.0,
+        # wind_noise          = 0.0,
+        # density_noise       = 0.0,
+        # viscosity_noise     = 0.0,
+        # gravity_noise       = 0.0,
+        # actuator_gain_noise = 0.0,
+        # actuator_bias_noise = 0.0,
+        # actuator_dyn_noise  = 0.0,
+        # observation_noise   = 0.0,
+        # ctrl_noise          = 0.0,
 
     )
 
@@ -1054,7 +1055,7 @@ def main():
     print("\n\n...done running.\n\n")
 
     train_final, metrics = out
-    env_final, step = train_final
+    env_final, step, kl_betas = train_final
     print("\n\nstep:", step)
 
 

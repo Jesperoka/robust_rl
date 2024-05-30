@@ -2,7 +2,7 @@
     <compiler angle="radian" meshdir="meshes" autolimits="true" />
     <option integrator="Euler" solver="Newton" timestep="0.002" iterations="3" ls_iterations="6"
         tolerance="1e-8" noslip_iterations="12" impratio="1.5">
-        <flag eulerdamp="disable" contact="enable" passive="disable" frictionloss="disable"
+        <flag eulerdamp="enable" contact="enable" passive="enable" frictionloss="disable"
             equality="disable" />
     </option>
 
@@ -84,19 +84,19 @@
                 friction="0.0"/>
         </body>
 
-        <body name="car_reward_board" pos="0.21 1.02 1.0">
-            <geom name="car_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" />
-            <body name="car_reward_indicator" pos="0 0 -1.0">
-                <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/>
-            </body>
-        </body>
+        <!-- <body name="car_reward_board" pos="0.21 1.02 1.0"> -->
+        <!--     <geom name="car_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" /> -->
+        <!--     <body name="car_reward_indicator" pos="0 0 -1.0"> -->
+        <!--         <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/> -->
+        <!--     </body> -->
+        <!-- </body> -->
 
-        <body name="arm_reward_board" pos="0.71 1.02 1.0">
-            <geom name="arm_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" />
-            <body name="arm_reward_indicator" pos="0 0 -1.0">
-                <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/>
-            </body>
-        </body>
+        <!-- <body name="arm_reward_board" pos="0.71 1.02 1.0"> -->
+        <!--     <geom name="arm_reward_board_background" pos="0 0 0" size="0.1 0.01 1.0" type="box" rgba="0.1 0.1 0.1 1.0" /> -->
+        <!--     <body name="arm_reward_indicator" pos="0 0 -1.0"> -->
+        <!--         <geom pos="0 0 0" size="0.15 0.015 0.035" type="box" rgba="0.556863 0.858824 0.117647 1.0"/> -->
+        <!--     </body> -->
+        <!-- </body> -->
         
         <body name="car_goal" pos="0 0 0.115">
             <geom pos="0 0 0" size="0.1 0.005" type="cylinder" rgba="0.858824 0.556863 0.117647 1.0" />
@@ -138,9 +138,9 @@
     </worldbody>
 
     <keyframe>
-        <key name="pick_up_2"
-            qpos='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.0335 0.0335 -0.15 -0.50 1.24 1 0 0 0'
-            ctrl='0 0 0 -1.55859 -0.0943931 -0.323573 -2.11909 0.0186528 2.00782 0.0113511 0.020 0.0 0.020 0.0' />
+        <key name="q_start"
+            qpos="0 0 0 0.0 -0.78539816 0.0 -2.35619449 0.0 1.57079633 0.78539816 0 0 0 0 0 0 0 0 0"
+            ctrl="0 0 0 0.0 -0.78539816 0.0 -2.35619449 0.0 1.57079633 0.78539816 0 0 0 0" />
     </keyframe>
 
     <!-- Actuators -->
@@ -155,27 +155,72 @@
             joint="car_hinge" name="car_ang_vel" />
 
         <!-- Joint actuators -->
-        <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_0" name="tau_0" />
-        <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_1" name="tau_1" />
-        <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_2" name="tau_2" />
-        <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_3" name="tau_3" />
-        <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_4" name="tau_4" />
-        <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_5" name="tau_5" />
-        <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_6" name="tau_6" />
+        <!-- <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_0" name="tau_0" /> -->
+        <!-- <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_1" name="tau_1" /> -->
+        <!-- <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_2" name="tau_2" /> -->
+        <!-- <motor ctrlrange="-87 87" forcerange="-87 87" joint="joint_3" name="tau_3" /> -->
+        <!-- <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8" -->
+        <!--     joint="car_hinge" name="car_ang_vel" /> -->
+        <!-- <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_4" name="tau_4" /> -->
+        <!-- <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_5" name="tau_5" /> -->
+        <!-- <velocity ctrllimited="true" ctrlrange="-2.1750 2.1750" gear="1 0 0 0 0 0" kv="8" -->
+        <!--     joint="car_hinge" name="car_ang_vel" /> -->
+        <!-- -2.1750, -->
+        <!-- -2.6100, -->
+        <!-- <motor ctrlrange="-12 12" forcerange="-12 12" joint="joint_6" name="tau_6" /> -->
+
+    <!-- q_min: Array = field(default_factory=lambda:array([         # rad -->
+    <!--     -2.8973, --> 
+    <!--     -1.7628, --> 
+    <!--     -2.8973, --> 
+    <!--     -3.0718, --> 
+    <!--     -2.8973, --> 
+    <!--     -0.0175, --> 
+    <!--     -2.8973 -->
+    <!-- ], dtype=float)) -->
+
+    <!-- q_max: Array = field(default_factory=lambda:array([         # rad -->   
+    <!--     2.8973, -->
+    <!--     1.7628, -->
+    <!--     2.8973, -->
+    <!--     -0.0698, -->
+    <!--     2.8973, -->
+    <!--     3.7525, -->
+    <!--     2.8973 -->
+    <!-- ], dtype=float)) -->
+
+        <!-- <general class="panda" name="joint_0" joint="joint_0" gainprm="4500" biasprm="0 -4500 -450" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450" ctrlrange="-1.7628 1.7628" forcerange="-87 87" /> --> 
+        <!-- <general class="panda" name="joint_2" joint="joint_2" gainprm="3500" biasprm="0 -3500 -350" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_3" joint="joint_3" gainprm="3500" biasprm="0 -3500 -350" ctrlrange="-3.0718 -0.0698" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_4" joint="joint_4" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+        <!-- <general class="panda" name="joint_5" joint="joint_5" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-0.0175 3.7525" forcerange="-12 12" /> -->
+        <!-- <general class="panda" name="joint_6" joint="joint_6" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+
+        <!-- <general class="panda" name="joint_0" joint="joint_0" gainprm="4500" biasprm="0 -4500 -450" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450" ctrlrange="-1.7628 1.7628" forcerange="-87 87" /> --> 
+        <!-- <general class="panda" name="joint_2" joint="joint_2" gainprm="3500" biasprm="0 -3500 -350" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_3" joint="joint_3" gainprm="3500" biasprm="0 -3500 -350" ctrlrange="-3.0718 -0.0698" forcerange="-87 87" /> -->
+        <!-- <general class="panda" name="joint_4" joint="joint_4" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+        <!-- <general class="panda" name="joint_5" joint="joint_5" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-0.0175 3.7525" forcerange="-12 12" /> -->
+        <!-- <general class="panda" name="joint_6" joint="joint_6" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+
+        <!-- <position class="panda" name="joint_0" joint="joint_0" kp="300" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <velocity class="panda" name="joint_0" joint="joint_0" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  />
+        <position class="panda" name="joint_1" joint="joint_1" kp="600" ctrlrange="-1.7628 1.7628" forcerange="-87 87" /> 
+        <position class="panda" name="joint_2" joint="joint_2" kp="600" ctrlrange="-2.8973 2.8973" forcerange="-87 87" />
+        <!-- <position class="panda" name="joint_3" joint="joint_3" kp="300" ctrlrange="-3.0718 -0.0698" forcerange="-87 87" /> -->
+        <velocity class="panda" name="joint_3" joint="joint_3" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  />
+        <position class="panda" name="joint_4" joint="joint_4" kp="250" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
+        <!-- <position class="panda" name="joint_5" joint="joint_5" kp="80" ctrlrange="-0.0175 3.7525" forcerange="-12 12" /> -->
+        <velocity class="panda" name="joint_5" joint="joint_5" kv="20" ctrlrange="-2.5 2.5" forcerange="-12 12"  />
+        <position class="panda" name="joint_6" joint="joint_6" kp="150" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
 
         <!-- Gripper actuator -->
-        <position class="panda" name="left_finger_position" joint="finger_joint_1"
-            forcerange="-100 100" kp="100"
-            ctrlrange="0 0.04" />
-        <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1"
-            forcerange="-35 35" kv="100"
-            ctrlrange="-0.05 0.05" />
-        <position class="panda" name="right_finger_position" joint="finger_joint_2"
-            forcerange="-100 100" kp="100"
-            ctrlrange="0 0.04" />
-        <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2"
-            forcerange="-35 35" kv="100"
-            ctrlrange="-0.05 0.05" />
+        <position class="panda" name="left_finger_position" joint="finger_joint_1" forcerange="-100 100" kp="100" ctrlrange="0 0.04" />
+        <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1" forcerange="-35 35" kv="100" ctrlrange="-0.05 0.05" />
+        <position class="panda" name="right_finger_position" joint="finger_joint_2" forcerange="-100 100" kp="100" ctrlrange="0 0.04" />
+        <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2" forcerange="-35 35" kv="100" ctrlrange="-0.05 0.05" />
 
     </actuator>
 

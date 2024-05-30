@@ -86,7 +86,8 @@ class A_to_B:
 
         # Spline low level tracking controller
         self.vel_margin: float = options.velocity_margin # how close the low level arm controller can go to the joint velocity limits before zeroing torque commands
-        self.arm_low_level_ctrl: Callable[[Array, Array, Array, Array, Array, Array, Array, Array], Array] = partial(options.arm_low_level_ctrl, float(self.mjx_model.opt.timestep), self.vel_margin)
+        # self.arm_low_level_ctrl: Callable[[Array, Array, Array, Array, Array, Array, Array, Array], Array] = partial(options.arm_low_level_ctrl, float(self.mjx_model.opt.timestep), self.vel_margin)
+        self.arm_low_level_ctrl = options.arm_low_level_ctrl
 
         # Domain randomization. Noises are uniform in [-noise, noise]. (+) additive, [*] multiplicative
         self.timestep_noise:        float = options.timestep_noise      # s         (+)     timestep = timestep + noise
@@ -478,7 +479,7 @@ class A_to_B:
                 action[0 : self.nu_car],                                                                            
                 # action[self.nu_car : self.nu_car + self.nu_arm],                                                    
                 # action[self.nu_car + self.nu_arm : ]                                                                
-                action[0 : -1],
+                action[self.nu_car : -1],
                 action[-1:]
                 )
         # -> (a_car, a_arm, a_gripper)
@@ -495,12 +496,15 @@ class A_to_B:
                 ), jnp.zeros((self.nq_car, ))
 
     def reset_arm(self, rng_arm: Array) -> tuple[Array, Array]:
-        return self.arm_limits.q_start + 0.1*jax.random.uniform(
+        noise = 0.2*jax.random.uniform(
                 key=rng_arm,
                 shape=(self.nq_arm,),
                 minval=self.arm_limits.q_min,                                                                       
                 maxval=self.arm_limits.q_max
-                ), jnp.zeros((self.nq_arm, ))
+                )
+        noise = jnp.zeros_like(noise).at[0].set(noise[0]).at[3].set(noise[3]).at[5].set(noise[5])
+
+        return jnp.clip(self.arm_limits.q_start + noise, self.arm_limits.q_min, self.arm_limits.q_max), jnp.zeros((self.nq_arm, ))
 
     def reset_gripper(self, rng_gripper: Array) -> tuple[Array, Array]:
         return jnp.concatenate([                                        

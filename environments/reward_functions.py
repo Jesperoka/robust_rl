@@ -1,7 +1,7 @@
 """Definitions of reward functions, coupled to the environment by 'decode_observation(obs)' (and 'decode_action(act)' in the future) function(s)."""
 from jax import Array
 from jax import debug
-from jax.numpy  import array, clip, concatenate, float32, dot, logical_or, newaxis, where, exp, sum as jnp_sum, squeeze
+from jax.numpy  import array, clip, concatenate, float32, dot, logical_or, newaxis, where, exp, sum as jnp_sum, squeeze, abs as jnp_abs
 from jax.numpy.linalg import norm
 from environments.options import ObsDecodeFuncSig
 from environments.physical import ZeusLimits, PandaLimits, PlayingArea
@@ -272,44 +272,44 @@ def simple_curriculum_reward(
         db_target
      ) = decode_obs(obs) 
 
-    # # Car reward basis functions
-    # car_a = max_steps/(2.0 - 1.0)
-    # car_d = 2.0
-    # car_s = 0.90
+    # Car reward basis functions
+    car_a = max_steps/(2.0 - 1.0)
+    car_d = 2.0
+    car_s = 0.90
 
-    # alpha_0 = gaussian(step, 0.0*car_a, car_a/car_d)
-    # alpha_1 = gaussian(step, 1.0*car_a, car_a/car_d)
+    alpha_0 = gaussian(step, 0.0*car_a, car_a/car_d)
+    alpha_1 = gaussian(step, 1.0*car_a, car_a/car_d)
 
-    # # Normalize the blending weights
-    # alpha_sum = alpha_0 + alpha_1 
-    # alpha_0, alpha_1 = alpha_0/alpha_sum, alpha_1/alpha_sum 
+    # Normalize the blending weights
+    alpha_sum = alpha_0 + alpha_1 
+    alpha_0, alpha_1 = alpha_0/alpha_sum, alpha_1/alpha_sum 
 
-    # # Car reward
-    # zeus_reward = (
-    #         alpha_0*simple_car_reward_0(dc_goal, q_car, db_target, qd_car, p_goal) 
-    #         + alpha_1*simple_car_reward_1(dc_goal, q_car, db_target, qd_car, p_goal) 
-    # )
+    # Car reward
+    zeus_reward = (
+            alpha_0*simple_car_reward_0(dc_goal, q_car, db_target, qd_car, p_goal) 
+            + alpha_1*simple_car_reward_1(dc_goal, q_car, db_target, qd_car, p_goal) 
+    )
 
-    # # Arm reward basis functions
-    # arm_a = max_steps/(2.0 - 1.0)
-    # arm_d = 2.0
+    # Arm reward basis functions
+    arm_a = max_steps/(2.0 - 1.0)
+    arm_d = 2.0
 
-    # beta_0 = gaussian(step, 0.0*arm_a, arm_a/arm_d)
-    # beta_1 = gaussian(step, 1.0*arm_a, arm_a/arm_d)
+    beta_0 = gaussian(step, 0.0*arm_a, arm_a/arm_d)
+    beta_1 = gaussian(step, 1.0*arm_a, arm_a/arm_d)
 
-    # # Normalize the blending weights
-    # beta_sum = beta_0 + beta_1 
-    # beta_0, beta_1 = beta_0/beta_sum, beta_1/beta_sum
+    # Normalize the blending weights
+    beta_sum = beta_0 + beta_1 
+    beta_0, beta_1 = beta_0/beta_sum, beta_1/beta_sum
     
-    # # Arm reward    
-    # panda_reward = (
-    #         beta_0*simple_arm_reward_0(qd_arm, db_target, gripping, dc_goal, q_car, p_ball) 
-    #         + beta_1*simple_arm_reward_1(qd_arm, db_target, dc_goal, gripping)
-    # )
+    # Arm reward    
+    panda_reward = (
+            beta_0*simple_arm_reward_0(q_arm, qd_arm, db_target, gripping, dc_goal, q_car, p_ball) 
+            + beta_1*simple_arm_reward_1(q_arm, qd_arm, db_target, dc_goal, gripping)
+    )
 
     # JUST TO ENSURE NO DIFFERENCE BECAUSE OF REWARDS WHILE DEBUGGING
-    zeus_reward = simple_car_reward_0(dc_goal, q_car, db_target, qd_car, p_goal)
-    panda_reward = simple_arm_reward_0(qd_arm, db_target, gripping, dc_goal, q_car, p_ball)
+    # zeus_reward = simple_car_reward_0(dc_goal, q_car, db_target, qd_car, p_goal)
+    # panda_reward = simple_arm_reward_0(qd_arm, db_target, gripping, dc_goal, q_car, p_ball)
 
     return zeus_reward.squeeze(), panda_reward.squeeze()
 # ----------------------------------------------------------------------------------------------------
@@ -333,14 +333,20 @@ def simple_curriculum_reward(
 # THIRD ATTEMPT
 def simple_car_reward_0(dc_goal: Array, q_car: Array, db_target: Array, qd_car: Array, p_goal: Array) -> Array:
     return  (
-            -dc_goal + 10.0*close_enough(dc_goal) #- 25.0*close_enough(db_target) 
+            - dc_goal 
+            + 10.0*close_enough(dc_goal) 
+            - 0.5*inverse_plus_one(db_target)
+            - 10.0*close_enough(db_target) 
             + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
             + punish_car_outside_limits(q_car[0], q_car[1])
             )
 
 def simple_car_reward_1(dc_goal: Array, q_car: Array, db_target: Array, qd_car: Array, p_goal: Array) -> Array:
     return  (
-            -dc_goal + 10.0*close_enough(dc_goal) #- 75.0*close_enough(db_target) 
+            -dc_goal 
+            + 10.0*close_enough(dc_goal)
+            - 0.5*inverse_plus_one(db_target)
+            - 10.0*close_enough(db_target) 
             + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
             + punish_car_outside_limits(q_car[0], q_car[1])
             )
@@ -373,35 +379,32 @@ def simple_car_reward_1(dc_goal: Array, q_car: Array, db_target: Array, qd_car: 
 #             + punish_bad_joint_velocities(qd_arm)
 #         )
 # SECOND ATTEMPT
-def simple_arm_reward_0(qd_arm: Array, db_target: Array, gripping: Array, dc_goal: Array, q_car: Array, p_ball: Array) -> Array:
+def simple_arm_reward_0(q_arm: Array, qd_arm: Array, db_target: Array, gripping: Array, dc_goal: Array, q_car: Array, p_ball: Array) -> Array:
     return (
-            # gripping*0.05
-            # + (gripping)*0.5*hold_above(q_car, p_ball)
-            # + 2.0*inverse_plus_one((3.0*db_target)**2)
-            # - 1.0*inverse_plus_one(dc_goal)
-            # - 0.05*db_target
-            # - 25*close_enough(dc_goal)
-            # + (1-gripping)*100*close_enough(db_target)
-            # + 20.0*inverse_plus_one(qd_arm)
-            # + punish_bad_joint_velocities_2(qd_arm)
-            inverse_plus_one(db_target)
+            0.5*gripping
+            + gripping*inverse_plus_one(db_target)
+            + (1-gripping)*2.5*inverse_plus_one(db_target)
+            - inverse_plus_one(dc_goal)
+            - 0.05*db_target**2
+            + (1-gripping)*10.0*close_enough(db_target, threshold=0.1)
+            - 10.0*close_enough(dc_goal)
+            + 0.5*inverse_plus_one(clip(jnp_abs(q_arm - PandaLimits().q_start) - 0.3, 0.0, 100.0))
+            + 0.5*inverse_plus_one(qd_arm)
+            + punish_bad_joint_velocities_2(qd_arm)
             )
 
-def simple_arm_reward_1(qd_arm: Array, db_target: Array, dc_goal: Array, gripping: Array) -> Array:
+def simple_arm_reward_1(q_arm: Array, qd_arm: Array, db_target: Array, dc_goal: Array, gripping: Array) -> Array:
     return (
-            # + 2.0*inverse_plus_one(db_target)
-            # + (gripping)*2.0*(0.5 - dc_goal)
-            # + (1 - gripping)*(2.0*inverse_plus_one(db_target))**2
-            # - (1 - gripping)*(0.1*((2.0*db_target)**2))
-            # - (1.5*inverse_plus_one(dc_goal))**2
-            # + 2.0*inverse_plus_one(db_target)
-            # - 10.0*inverse_plus_one(dc_goal)
-            # - 0.05*db_target
-            # - 25*close_enough(dc_goal)
-            # + (1-gripping)*100*close_enough(db_target)
-            # + punish_bad_joint_velocities_2(qd_arm)
-            # + 20.0*inverse_plus_one(qd_arm)
-            inverse_plus_one(db_target)
+            0.5*gripping
+            + gripping*inverse_plus_one(db_target)
+            + (1-gripping)*2.5*inverse_plus_one(db_target)
+            - inverse_plus_one(dc_goal)
+            - 0.05*db_target**2
+            + (1-gripping)*10.0*close_enough(db_target, threshold=0.05)
+            - 10.0*close_enough(dc_goal)
+            + 0.5*inverse_plus_one(clip(jnp_abs(q_arm - PandaLimits().q_start) - 0.3, 0.0, 100.0))
+            + 0.5*inverse_plus_one(qd_arm)
+            + punish_bad_joint_velocities_2(qd_arm)
             )
 # ----------------------------------------------------------------------------------------------------
 

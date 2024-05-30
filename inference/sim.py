@@ -196,6 +196,10 @@ def rollout(
             actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
 
+            # environment_action = environment_action.at[3].set(1.0)
+            # environment_action = environment_action.at[4].set(-1.0)
+            # environment_action = environment_action.at[5].set(-1.0)
+
             car_orientation = get_car_orientation(data)
             rng_a, observation = env.observe(rng_a, data, p_goal) # type abuse # TODO: revert back to not passing rng
             rng_a, data.ctrl, a_arm, a_gripper, ball_released = jit_compute_controls(rng_a, car_orientation, observation, environment_action, ball_released) # type abuse
@@ -216,11 +220,10 @@ def rollout(
                 # Spline tracking controller
                 t = (data.time - t_0)*normalizing_factor
                 # data.ctrl[env.nu_car:env.nu_car+env.nu_arm] = jit_arm_low_level_ctrl(
-                #     t, 
                 #     data.qpos[env.nq_car:env.nq_car+env.nq_arm], 
                 #     data.qvel[env.nv_car:env.nv_car+env.nv_arm], 
                 #     data.qacc[env.nv_car:env.nv_car+env.nv_arm],
-                #     b0, b1, b2, b3
+                #     a_arm
                 # )
 
                 # Gripper timed release
@@ -253,8 +256,6 @@ def rollout(
             environment_state = EnvironmentState(reset_rng, model, data, p_goal, b_prev, ball_released)
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
-            # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = clip_cpu(1.4142136*car_reward + 1.0, -1.05, 1.05)
-            # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = clip_cpu(arm_reward, -1.05, 1.05)
 
             done = array_cpu([done])
         

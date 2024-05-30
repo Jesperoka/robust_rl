@@ -8,6 +8,8 @@ from functools import partial
 from time import sleep
 from sys import exit
 
+from inference.controllers import minimal_actions_controller
+
 
 if __name__ == "__main__":
     from os import environ
@@ -254,9 +256,9 @@ def main():
     from environments.A_to_B_jax import A_to_B                  
     from environments.physical import ZeusLimits, PandaLimits
     from environments.options import EnvironmentOptions 
-    from environments.reward_functions import curriculum_reward
+    from environments.reward_functions import curriculum_reward, simple_curriculum_reward
     from inference.sim import rollout, FakeRenderer
-    from inference.controllers import arm_fixed_pose, gripper_always_grip, arm_spline_tracking_controller, gripper_ctrl 
+    from inference.controllers import arm_fixed_pose, gripper_always_grip, arm_spline_tracking_controller, gripper_ctrl, minimal_actions_low_level_controller, minimal_pos_controller
     from algorithms.utils import initialize_actors, FakeTrainState
     from jax import tree_map, device_get
     from orbax.checkpoint import Checkpointer, PyTreeCheckpointHandler, args, StandardCheckpointHandler
@@ -282,10 +284,12 @@ def main():
     num_envs = 1
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = partial(curriculum_reward, 20_000_000),
+        reward_fn      = partial(simple_curriculum_reward, 20_000_000),
         # car_ctrl       = car_fixed_pose,
-        # arm_ctrl       = arm_fixed_pose,
-        arm_low_level_ctrl = arm_spline_tracking_controller,
+        arm_ctrl       = minimal_pos_controller,
+        arm_act_min         = jnp.concatenate([jnp.array([-1.58]), PandaLimits().q_min[3][jnp.newaxis], PandaLimits().q_min[5][jnp.newaxis]]),
+        arm_act_max         = jnp.concatenate([jnp.array([1.58]), PandaLimits().q_max[3][jnp.newaxis], PandaLimits().q_dot_max[5][jnp.newaxis]]),
+        # arm_low_level_ctrl = minimal_actions_low_level_controller,
         gripper_ctrl   = gripper_ctrl,
         # gripper_ctrl   = gripper_always_grip,
         goal_radius    = 0.05,
@@ -350,7 +354,7 @@ def main():
 
     lr = 3.0e-4
     max_grad_norm = 0.5
-    rnn_hidden_size = 32 
+    rnn_hidden_size = 8
     rnn_fc_size = 64 
 
 
@@ -375,10 +379,10 @@ def main():
 
     _rollout_fn = partial(rollout, env, model, data, actor_forward_fns, rnn_hidden_size)
 
-    with default_device(devices("cpu")[1]):
+    with default_device(devices("cpu")[0]):
         print("Running rollout")
         # r_frames = _rollout_fn(FakeRenderer(900, 640), actors, 0, max_steps=250)
-        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 20_000_000, max_steps=500)
+        r_frames = _rollout_fn(Renderer(model, 500, 640), restored_actors, 20_000_000, max_steps=200)
         print("Rollout finished with ", len(r_frames), " frames")
 
         from matplotlib.animation import FuncAnimation
