@@ -13,8 +13,8 @@ from matplotlib import pyplot as plt
 
 from pprint import pprint
 
-SCENE = "mujoco_models/scene_with_balls_rack.xml"
-# SCENE = "mujoco_models/scene.xml"
+# SCENE = "mujoco_models/scene_with_balls_rack.xml"
+SCENE = "mujoco_models/scene.xml"
 COMPILATION_CACHE_DIR = "compiled_functions"
 
 jax.config.update("jax_compilation_cache_dir", COMPILATION_CACHE_DIR)

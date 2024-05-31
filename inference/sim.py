@@ -87,7 +87,6 @@ def _reset_cpu(
     data.qvel = qvel
 
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
-    model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = -1.0
     mj_forward(model, data)
 
     b_prev = (q_start, q_start, q_start)
