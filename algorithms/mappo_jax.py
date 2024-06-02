@@ -1,13 +1,15 @@
 """Adapted from PureJaxRL and Mava implementations."""
 
 import jax
-from tensorflow_probability.substrates.jax.distributions import Distribution
+from os import environ
+from os.path import join, abspath, dirname
+
 if __name__=="__main__":
+    current_dir = dirname(abspath(__file__))
+    CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
+
     from multiprocessing import parent_process
     if parent_process() is None:
-        from os import environ
-        from os.path import join, abspath, dirname
-
         environ["XLA_FLAGS"] = (
                 "--xla_gpu_enable_triton_softmax_fusion=true "
                 "--xla_gpu_triton_gemm_any=true "
@@ -32,7 +34,7 @@ if __name__=="__main__":
 
 import jax.numpy as jnp
 
-from mujoco.mjx import Data, Model
+from mujoco.mjx import Model
 from jax import Array 
 from jax._src.random import KeyArray 
 from flax.typing import VariableDict
@@ -44,6 +46,8 @@ from algorithms.utils import MultiActorRNN, MultiCriticRNN, ActorInput, CriticIn
 from algorithms.visualize import PlotMetrics
 from multiprocessing import Queue
 from multiprocessing.queues import Full
+from orbax.checkpoint import Checkpointer, StandardCheckpointHandler, args
+from tensorflow_probability.substrates.jax.distributions import Distribution
 
 import pdb
 
@@ -407,13 +411,23 @@ def actor_loss(
     def loss(gae, log_prob, minibatch_log_prob, policy, kl_beta, entropy_rng):
         log_ratio = log_prob - minibatch_log_prob
         ratio = jnp.exp(log_ratio)
-        clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
         approx_kl = ((ratio - 1) - log_ratio).mean()
 
         entropy = policy.entropy(seed=entropy_rng).mean()
 
+        # PPO clipped objective
+        # clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
         # actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
-        actor_utility = (ratio*gae).mean()
+    
+        # PPO not clpping objective (kl penalty only)
+        # actor_utility = (ratio*gae).mean()
+
+        # P30 objective (i.e. sigmoid instead of clipping, https://arxiv.org/pdf/2205.10047)
+        # As far as I can tell tau is just set to 4 in the official implementation, and is never really explained in the paper.
+        # The word "temperature" which is what they call tau, is used once in the paper and it's just when they mention that tau is called that."
+        tau = 4 
+        actor_utility = (gae*(4.0/tau)*jax.nn.sigmoid(ratio*tau - tau)).mean()
+
         kl_beta = jnp.where(approx_kl > target_kl, kl_beta*1.5, kl_beta/1.5)
 
         entropy_regularized_actor_utility = actor_utility + ent_coef * entropy
@@ -617,6 +631,7 @@ def gradient_epoch_step(
 
 
 def train_step(
+        callback: Callable,                                                                         # partial() these in make_train()
         num_agents: int, num_env_steps: int, num_gradient_epochs: int,                              # partial() these in make_train()
         num_updates: int, gamma: float, gae_lambda: float,                                          # partial() these in make_train()
         env_step_fn: Callable[[EnvStepCarry, KeyArray], tuple[EnvStepCarry, Trajectory]],           # partial() these in make_train()
@@ -700,23 +715,6 @@ def train_step(
             kl_betas=epoch_final.kl_betas
     )
 
-    def callback(args):
-        with jax.default_device(jax.devices("cpu")[0]):
-            actors, plot_metrics, step = args 
-            print("\nstep", step, "of", num_updates, "total grad steps:", actors.train_states[0].step)
-            
-            actors.train_states = jax.tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
-            actors = jax.device_put(actors, jax.devices("cpu")[1])
-            plot_metrics = jax.device_put(plot_metrics, jax.devices("cpu")[1])
-
-            data_display_queue.put(plot_metrics)
-            try: 
-                rollout_generator_queue.put_nowait((actors, step))
-            except Full:
-                pass
-
-            if step >= num_updates:
-                rollout_generator_queue.put((None, None))
 
     min_policy_loss = jax.tree_map(lambda loss: jnp.min(loss).squeeze(), epoch_metrics.actor_losses)
     mean_policy_loss = jax.tree_map(lambda loss: jnp.mean(loss).squeeze(), epoch_metrics.actor_losses)
@@ -759,6 +757,34 @@ def train_step(
 # Top level function to create train function
 # -------------------------------------------------------------------------------------------------------
 def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Queue, data_display_queue: Queue) -> Callable:
+    
+    # Here we set up the callback function that will be used for visualization and checkpointing in the training loop
+    def callback(input):
+        with jax.default_device(jax.devices("cpu")[0]):
+            actors, plot_metrics, step = input 
+            print("\nstep", step, "of", config.num_updates, "total grad steps:", actors.train_states[0].step)
+            
+            actors.train_states = jax.tree_map(lambda ts: FakeTrainState(params=ts.params), actors.train_states, is_leaf=lambda x: not isinstance(x, tuple))
+            actors = jax.device_put(actors, jax.devices("cpu")[1])
+            plot_metrics = jax.device_put(plot_metrics, jax.devices("cpu")[1])
+
+            data_display_queue.put(plot_metrics)
+            try: 
+                rollout_generator_queue.put_nowait((actors, step))
+            except Full:
+                pass
+
+            if step >= config.num_updates:
+                rollout_generator_queue.put((None, None))
+
+            # Save every 10% of total training iterations 
+            if (step % int(0.1*config.num_updates)) == 0:
+                print("\n\nsaving actors...\n")
+                checkpointer = Checkpointer(StandardCheckpointHandler())
+                state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(actors.train_states)}
+                path = join(CHECKPOINT_DIR, "_IN_TRAINING_"+f"_{step}_"+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size))
+                checkpointer.save(path, force=True, args=args.StandardSave(state))
+                print("\n...actors saved to "+str(path)+" \n\n")
 
     # Here we set up the partial application of all the functions that will be used in the training loop
     # -------------------------------------------------------------------------------------------------------
@@ -797,6 +823,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
             gradient_minibatch_step_fn
     )
     train_step_fn = partial(train_step, 
+            callback,
             env.num_agents,
             config.num_env_steps, 
             config.update_epochs, 
@@ -965,7 +992,7 @@ def main():
         # total_timesteps = 2_097_152 // 16,
         update_epochs   = 5,
         num_minibatches = num_envs // minibatch_size,
-        gamma           = 0.99,
+        gamma           = 0.999,
         gae_lambda      = 0.90,
         clip_eps        = 0.3, 
         scale_clip_eps  = False,
@@ -989,8 +1016,8 @@ def main():
         arm_ctrl            = minimal_pos_controller,
         arm_act_min         = jnp.array([-2.0, -2.0, -2.5]),
         arm_act_max         = jnp.array([2.0, 2.0, 2.5]),
-        car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
-        car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
+        # car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
+        # car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
         # arm_low_level_ctrl  = arm_spline_tracking_controller,
         gripper_ctrl        = gripper_ctrl,
         goal_radius         = 0.05,

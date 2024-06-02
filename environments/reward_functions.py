@@ -63,7 +63,7 @@ def punish_car_outside_limits(x: Array, y: Array):
               logical_or(y < ZeusLimits().y_min, 
                          y > ZeusLimits().y_max))) 
 
-    return where(outside, -10.0, 0.0)
+    return where(outside, -10.0 - (1.5*x)**2 - (1.5*y)**2, 0.0)
 
 def plateau_03(x: Array) -> Array:
     x = clip(x, -1.3, 1.3) # clip to avoid NaNs
@@ -80,6 +80,10 @@ def plateau_005(x: Array):
 def distance_scaled_velocity_towards_goal(q_car: Array, qd_car: Array, p_goal: Array):
     delta = p_goal[0:2] - q_car[0:2]
     return dot(qd_car[0:2], delta)/(norm(delta, ord=2) + 1.0)
+
+def velocity_towards_target(xy_pos, xy_vel, target):
+    delta = target - xy_pos
+    return dot(xy_vel, delta)
 
 def close_enough(x: Array, threshold: float=0.05):
     return where(x <= threshold, 1.0, 0.0)
@@ -303,8 +307,8 @@ def simple_curriculum_reward(
     
     # Arm reward    
     panda_reward = (
-            beta_0*simple_arm_reward_0(q_arm, qd_arm, db_target, gripping, dc_goal, q_car, p_ball) 
-            + beta_1*simple_arm_reward_1(q_arm, qd_arm, db_target, dc_goal, gripping)
+            beta_0*simple_arm_reward_0(q_arm, qd_arm, db_target, gripping, dc_goal, q_car, p_ball, pd_ball) 
+            + beta_1*simple_arm_reward_1(q_arm, qd_arm, db_target, dc_goal, gripping, p_ball, pd_ball, q_car)
     )
 
     # JUST TO ENSURE NO DIFFERENCE BECAUSE OF REWARDS WHILE DEBUGGING
@@ -336,8 +340,8 @@ def simple_car_reward_0(dc_goal: Array, q_car: Array, db_target: Array, qd_car: 
             - dc_goal 
             + 10.0*close_enough(dc_goal) 
             - 0.5*inverse_plus_one(db_target)
-            - 10.0*close_enough(db_target) 
-            + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
+            - 5.0*close_enough(db_target) 
+            + 2.5*distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
             + punish_car_outside_limits(q_car[0], q_car[1])
             )
 
@@ -346,8 +350,8 @@ def simple_car_reward_1(dc_goal: Array, q_car: Array, db_target: Array, qd_car: 
             -dc_goal 
             + 10.0*close_enough(dc_goal)
             - 0.5*inverse_plus_one(db_target)
-            - 10.0*close_enough(db_target) 
-            + distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
+            - 5.0*close_enough(db_target) 
+            + 2.5*distance_scaled_velocity_towards_goal(q_car, qd_car, p_goal)
             + punish_car_outside_limits(q_car[0], q_car[1])
             )
 # ----------------------------------------------------------------------------------------------------
@@ -379,31 +383,29 @@ def simple_car_reward_1(dc_goal: Array, q_car: Array, db_target: Array, qd_car: 
 #             + punish_bad_joint_velocities(qd_arm)
 #         )
 # SECOND ATTEMPT
-def simple_arm_reward_0(q_arm: Array, qd_arm: Array, db_target: Array, gripping: Array, dc_goal: Array, q_car: Array, p_ball: Array) -> Array:
+def simple_arm_reward_0(q_arm: Array, qd_arm: Array, db_target: Array, gripping: Array, dc_goal: Array, q_car: Array, p_ball: Array, pd_ball: Array) -> Array:
     return (
             0.5*gripping
-            + gripping*inverse_plus_one(db_target)
+            + gripping*1.5*velocity_towards_target(p_ball[0:2], pd_ball[0:2], q_car[0:2])
             + (1-gripping)*2.5*inverse_plus_one(db_target)
-            - inverse_plus_one(dc_goal)
-            - 0.05*db_target**2
+            - 0.5*inverse_plus_one(dc_goal)
+            - 0.05*(db_target**2)
             + (1-gripping)*10.0*close_enough(db_target, threshold=0.1)
-            - 10.0*close_enough(dc_goal)
-            + 0.5*inverse_plus_one(clip(jnp_abs(q_arm - PandaLimits().q_start) - 0.3, 0.0, 100.0))
-            + 0.5*inverse_plus_one(qd_arm)
+            - 5.0*close_enough(dc_goal)
+            + 0.05*inverse_plus_one(jnp_sum(qd_arm)[newaxis])
             + punish_bad_joint_velocities_2(qd_arm)
             )
 
-def simple_arm_reward_1(q_arm: Array, qd_arm: Array, db_target: Array, dc_goal: Array, gripping: Array) -> Array:
+def simple_arm_reward_1(q_arm: Array, qd_arm: Array, db_target: Array, dc_goal: Array, gripping: Array, p_ball: Array, pd_ball: Array, q_car: Array) -> Array:
     return (
             0.5*gripping
-            + gripping*inverse_plus_one(db_target)
+            + gripping*1.5*velocity_towards_target(p_ball[0:2], pd_ball[0:2], q_car[0:2])
             + (1-gripping)*2.5*inverse_plus_one(db_target)
-            - inverse_plus_one(dc_goal)
-            - 0.05*db_target**2
+            - 0.5*inverse_plus_one(dc_goal)
+            - 0.05*(db_target**2)
             + (1-gripping)*10.0*close_enough(db_target, threshold=0.05)
-            - 10.0*close_enough(dc_goal)
-            + 0.5*inverse_plus_one(clip(jnp_abs(q_arm - PandaLimits().q_start) - 0.3, 0.0, 100.0))
-            + 0.5*inverse_plus_one(qd_arm)
+            - 5.0*close_enough(dc_goal)
+            + 0.05*inverse_plus_one(jnp_sum(qd_arm)[newaxis])
             + punish_bad_joint_velocities_2(qd_arm)
             )
 # ----------------------------------------------------------------------------------------------------

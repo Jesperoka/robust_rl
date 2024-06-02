@@ -42,7 +42,7 @@ where_cpu = jit(_where, backend="cpu")
 def slice_cpu(x, start_indices, limit_indices): return x[start_indices:limit_indices]
 
 
-global_rng = PRNGKey_cpu(PRNG_SEED)
+global_rng = PRNGKey_cpu(PRNG_SEED + 12345)
 
 global_cam = MjvCamera()
 global_cam.elevation = -30

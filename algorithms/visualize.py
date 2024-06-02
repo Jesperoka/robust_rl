@@ -273,7 +273,8 @@ def main():
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
     # CHECKPOINT_FILE = "simple_curriculum"
     # CHECKPOINT_FILE = "zeus_rnn_32"
-    CHECKPOINT_FILE = "checkpoint_LATEST"
+    # CHECKPOINT_FILE = "checkpoint_LATEST"
+    CHECKPOINT_FILE = "_IN_TRAINING__85_"
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -286,9 +287,11 @@ def main():
     options: EnvironmentOptions = EnvironmentOptions(
         reward_fn      = partial(simple_curriculum_reward, 20_000_000),
         # car_ctrl       = car_fixed_pose,
-        arm_ctrl       = minimal_pos_controller,
-        arm_act_min         = jnp.concatenate([jnp.array([-1.58]), PandaLimits().q_min[3][jnp.newaxis], PandaLimits().q_min[5][jnp.newaxis]]),
-        arm_act_max         = jnp.concatenate([jnp.array([1.58]), PandaLimits().q_max[3][jnp.newaxis], PandaLimits().q_dot_max[5][jnp.newaxis]]),
+        arm_ctrl            = minimal_pos_controller,
+        arm_act_min         = jnp.array([-2.0, -2.0, -2.5]),
+        arm_act_max         = jnp.array([2.0, 2.0, 2.5]),
+        # car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
+        # car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
         # arm_low_level_ctrl = minimal_actions_low_level_controller,
         gripper_ctrl   = gripper_ctrl,
         # gripper_ctrl   = gripper_always_grip,
