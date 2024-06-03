@@ -9,6 +9,7 @@ from jax.random import PRNGKey as _PRNGKey, split as _split
 from jax.numpy import concatenate as _concatenate, array as _array, copy as _copy, clip as _clip, mod as _mod, newaxis, where as _where
 from jax.numpy.linalg import norm as _norm
 from tensorflow_probability.substrates.jax.distributions import Distribution
+from environments.physical import PandaLimits
 from reproducibility_globals import PRNG_SEED
 from algorithms.utils import ActorInput, ScannedRNN, MultiActorRNN 
 from environments.A_to_B_jax import A_to_B
@@ -41,7 +42,7 @@ where_cpu = jit(_where, backend="cpu")
 def slice_cpu(x, start_indices, limit_indices): return x[start_indices:limit_indices]
 
 
-global_rng = PRNGKey_cpu(PRNG_SEED)
+global_rng = PRNGKey_cpu(PRNG_SEED + 12345)
 
 global_cam = MjvCamera()
 global_cam.elevation = -30
@@ -86,7 +87,6 @@ def _reset_cpu(
     data.qvel = qvel
 
     model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
-    model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = -1.0
     mj_forward(model, data)
 
     b_prev = (q_start, q_start, q_start)
@@ -146,6 +146,7 @@ def rollout(
     dummy_actor_hstate = ScannedRNN.initialize_carry(1, rnn_hidden_size)
     init_actor_hidden_states = tuple(dummy_actor_hstate for _ in range(env.num_agents))
     actor_hidden_states = tuple(copy_cpu(dummy_actor_hstate) for _ in range(env.num_agents))
+    actions = tuple(zeros((env.act_spaces[i].sample().shape[0])) for i in range(env.num_agents))
 
     _step = 0
 
@@ -156,7 +157,7 @@ def rollout(
         reset_rng, rng_r = split_cpu(rng_r)
 
         if done: # Reset logic
-            rng_a, model, data, p_goal, b_prev, ball_released = environment_state 
+            # rng_a, model, data, p_goal, b_prev, ball_released = environment_state 
 
             actor_hidden_states = tuple(copy_cpu(hs) for hs in init_actor_hidden_states)
             _, environment_state, observation = reset_cpu(environment_state)
@@ -173,7 +174,12 @@ def rollout(
         else: # Step logic
             reset_rng, model, data, p_goal, b_prev, ball_released = environment_state 
 
-            actor_inputs = tuple((observation[newaxis, :][newaxis, :], done[newaxis, :]) for _ in range(env.num_agents))
+            actor_inputs = tuple(
+                    ActorInput(
+                        observation[newaxis, :][newaxis, :],
+                        done[newaxis, :]
+                    ) for i in range(env.num_agents)
+                    )
     
             actor_hidden_states, policies = zip(*tree_map(
                 lambda apply_fn, ts, vars, hs, ins: apply_fn({"params": ts.params, "vars": vars}, hs, ins, train=False),
@@ -186,8 +192,12 @@ def rollout(
             ))
 
             # Can do policy.mode() or policy.sample() here for rollout of deterministic or stochastic policies respectively.
-            actions = tree_map(lambda policy, rng: policy.mode().squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
+            actions = tree_map(lambda policy, rng: policy.sample(seed=rng).squeeze(), policies, tuple(action_rngs), is_leaf=lambda x: not isinstance(x, tuple))
             environment_action = concatenate_cpu(actions, axis=-1)
+
+            # environment_action = environment_action.at[3].set(1.0)
+            # environment_action = environment_action.at[4].set(-1.0)
+            # environment_action = environment_action.at[5].set(-1.0)
 
             car_orientation = get_car_orientation(data)
             rng_a, observation = env.observe(rng_a, data, p_goal) # type abuse # TODO: revert back to not passing rng
@@ -200,17 +210,20 @@ def rollout(
             b0, b1, b2 = b_prev
             b3 = a_arm
 
+            # # TEMP
+            # if env_step < 75:
+            #     b3 = PandaLimits().q_start
+
             for step in range(env.steps_per_ctrl):
 
                 # Spline tracking controller
                 t = (data.time - t_0)*normalizing_factor
-                data.ctrl[env.nu_car:env.nu_car+env.nu_arm] = jit_arm_low_level_ctrl(
-                    t, 
-                    data.qpos[env.nq_car:env.nq_car+env.nq_arm], 
-                    data.qvel[env.nv_car:env.nv_car+env.nv_arm], 
-                    data.qacc[env.nv_car:env.nv_car+env.nv_arm],
-                    b0, b1, b2, b3
-                )
+                # data.ctrl[env.nu_car:env.nu_car+env.nu_arm] = jit_arm_low_level_ctrl(
+                #     data.qpos[env.nq_car:env.nq_car+env.nq_arm], 
+                #     data.qvel[env.nv_car:env.nv_car+env.nv_arm], 
+                #     data.qacc[env.nv_car:env.nv_car+env.nv_arm],
+                #     a_arm
+                # )
 
                 # Gripper timed release
                 grip = jit_gripper_ctrl(array_cpu(1))
@@ -242,8 +255,6 @@ def rollout(
             environment_state = EnvironmentState(reset_rng, model, data, p_goal, b_prev, ball_released)
 
             model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_goal")).pos = concatenate_cpu((p_goal, array_cpu([0.115])), axis=0)  # goal visualization
-            # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "car_reward_indicator")).pos[2] = clip_cpu(1.4142136*car_reward + 1.0, -1.05, 1.05)
-            # model.body(mj_name2id(model, mjtObj.mjOBJ_BODY.value, "arm_reward_indicator")).pos[2] = clip_cpu(arm_reward, -1.05, 1.05)
 
             done = array_cpu([done])
         

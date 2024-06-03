@@ -22,3 +22,5 @@ class AlgorithmConfig:
     env_name:        str = "A_to_B"
     rnn_hidden_size: int = 32 
     rnn_fc_size:     int = 256 
+    kl_betas:        tuple[float, ...] = (1.0, 1.0)
+    target_kl:       float = 0.013

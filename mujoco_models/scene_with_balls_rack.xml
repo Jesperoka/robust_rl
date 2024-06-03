@@ -221,47 +221,24 @@
     <actuator>
 
         <!-- Car actuators -->
-        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
-            joint="car_slider_x" name="car_vel_x" />
-        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8"
-            joint="car_slider_y" name="car_vel_y" />
-        <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8"
-            joint="car_hinge" name="car_ang_vel" />
+        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8" joint="car_slider_x" name="car_vel_x" />
+        <velocity ctrllimited="true" ctrlrange="-0.8 0.8" gear="1 0 0 0 0 0" kv="8" joint="car_slider_y" name="car_vel_y" />
+        <velocity ctrllimited="true" ctrlrange="-1.0 1.0" gear="1 0 0 0 0 0" kv="8" joint="car_hinge" name="car_ang_vel" />
 
         <!-- Joint actuators -->
         <general class="panda" name="joint_0" joint="joint_0" gainprm="4500" biasprm="0 -4500 -450" />
-        <general
-            class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450"
-            ctrlrange="-1.7628 1.7628" />
-        <general class="panda" name="joint_2" joint="joint_2"
-            gainprm="3500" biasprm="0 -3500 -350" />
-        <general class="panda" name="joint_3"
-            joint="joint_3" gainprm="3500" biasprm="0 -3500 -350"
-            ctrlrange="-3.0718 -0.0698" />
-        <general class="panda" name="joint_4" joint="joint_4"
-            gainprm="2000" biasprm="0 -2000 -200"
-            forcerange="-12 12" />
-        <general class="panda" name="joint_5" joint="joint_5"
-            gainprm="2000" biasprm="0 -2000 -200"
-            forcerange="-12 12"
-            ctrlrange="-0.0175 3.7525" />
-        <general class="panda" name="joint_6" joint="joint_6"
-            gainprm="2000" biasprm="0 -2000 -200"
-            forcerange="-12 12" />
+        <general class="panda" name="joint_1" joint="joint_1" gainprm="4500" biasprm="0 -4500 -450" ctrlrange="-1.7628 1.7628" />
+        <general class="panda" name="joint_2" joint="joint_2" gainprm="3500" biasprm="0 -3500 -350" />
+        <general class="panda" name="joint_3" joint="joint_3" gainprm="3500" biasprm="0 -3500 -350" ctrlrange="-3.0718 -0.0698" />
+        <general class="panda" name="joint_4" joint="joint_4" gainprm="2000" biasprm="0 -2000 -200" forcerange="-12 12" />
+        <general class="panda" name="joint_5" joint="joint_5" gainprm="2000" biasprm="0 -2000 -200" forcerange="-12 12" ctrlrange="-0.0175 3.7525" />
+        <general class="panda" name="joint_6" joint="joint_6" gainprm="2000" biasprm="0 -2000 -200" forcerange="-12 12" />
 
         <!-- Gripper actuator -->
-        <position class="panda" name="left_finger_position" joint="finger_joint_1"
-            forcerange="-100 100" kp="100"
-            ctrlrange="0 0.04" />
-        <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1"
-            forcerange="-35 35" kv="100"
-            ctrlrange="-0.05 0.05" />
-        <position class="panda" name="right_finger_position" joint="finger_joint_2"
-            forcerange="-100 100" kp="100"
-            ctrlrange="0 0.04" />
-        <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2"
-            forcerange="-35 35" kv="100"
-            ctrlrange="-0.05 0.05" />
+        <position class="panda" name="left_finger_position" joint="finger_joint_1" forcerange="-100 100" kp="100" ctrlrange="0 0.04" />
+        <velocity class="panda" name="left_finger_velocity" joint="finger_joint_1" forcerange="-35 35" kv="100" ctrlrange="-0.05 0.05" />
+        <position class="panda" name="right_finger_position" joint="finger_joint_2" forcerange="-100 100" kp="100" ctrlrange="0 0.04" />
+        <velocity class="panda" name="right_finger_velocity" joint="finger_joint_2" forcerange="-35 35" kv="100" ctrlrange="-0.05 0.05" />
 
     </actuator>
 

@@ -9,9 +9,9 @@ ObsDecodeFuncSig: TypeAlias = Callable[[Array], tuple[Array, Array, Array, Array
                                                       Array, Array, Array, Array, 
                                                       Array, 
                                                       Array,
-                                                      Array, Array, Array, Array,
-                                                      Array, Array, Array, Array,
-                                                      Array, Array, Array, Array,
+                                                      # Array, Array, Array, Array,
+                                                      # Array, Array, Array, Array,
+                                                      # Array, Array, Array, Array,
                                                       Array,
                                                       ]]
 
@@ -37,8 +37,8 @@ class EnvironmentOptions:
     steps_per_ctrl: int = 1
     time_limit:     float = 5.0     # s
     agent_ids:      tuple[Literal["Zeus"], Literal["Panda"]] = ("Zeus", "Panda")
-    obs_min:        Array = field(default_factory=lambda: -3.5*ones(46, dtype=float32))
-    obs_max:        Array = field(default_factory=lambda: 3.5*ones(46, dtype=float32))
+    obs_min:        Array = field(default_factory=lambda: -3.5*ones(46-12, dtype=float32))
+    obs_max:        Array = field(default_factory=lambda: 3.5*ones(46-12, dtype=float32))
     
     # We assume the policies output actions in [-1, 1], and then the environment scales them to act_min and act_max
     car_act_min:        Array = field(default_factory=lambda: ZeusLimits().a_min)
@@ -58,7 +58,7 @@ class EnvironmentOptions:
     viscosity_noise:        float = 0.00001 # kg/m/s    (+)     viscosity = viscosity + noise   [0, noise]
     gravity_noise:          float = 0.05    # m/s^2     (+)     gravity = gravity + noise
     actuator_gain_noise:    float = 0.1     # fraction  [*]     actuator_gainprm = (1 + noise)*actuator_gainprm
-    actuator_bias_noise:    float = 0.01     # fraction  [*]     actuator_biasprm = (1 + noise)*actuator_biasprm # WARNING: too large values can lead to NaNs
+    actuator_bias_noise:    float = 0.001     # fraction  [*]     actuator_biasprm = (1 + noise)*actuator_biasprm # WARNING: too large values can lead to NaNs
     actuator_dyn_noise:     float = 0.01     # fraction  [*]     actuator_dynprm  = (1 + noise)*actuator_dynprm
     observation_noise:      float = 0.01    # fraction  [*]     obs = (1 + noise)*obs
     ctrl_noise:             float = 0.001   # fraction  [*]     act = (1 + noise)*act

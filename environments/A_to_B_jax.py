@@ -84,9 +84,10 @@ class A_to_B:
         ) 
         self.act_spaces:    tuple[Space, Space] = (self.act_space_car, self.act_space_arm)
 
-        # Arm low level tracking controller
+        # Spline low level tracking controller
         self.vel_margin: float = options.velocity_margin # how close the low level arm controller can go to the joint velocity limits before zeroing torque commands
-        self.arm_low_level_ctrl: Callable[[Array, Array, Array, Array, Array, Array, Array, Array], Array] = partial(options.arm_low_level_ctrl, float(self.mjx_model.opt.timestep), self.vel_margin)
+        # self.arm_low_level_ctrl: Callable[[Array, Array, Array, Array, Array, Array, Array, Array], Array] = partial(options.arm_low_level_ctrl, float(self.mjx_model.opt.timestep), self.vel_margin)
+        self.arm_low_level_ctrl = options.arm_low_level_ctrl
 
         # Domain randomization. Noises are uniform in [-noise, noise]. (+) additive, [*] multiplicative
         self.timestep_noise:        float = options.timestep_noise      # s         (+)     timestep = timestep + noise
@@ -172,7 +173,7 @@ class A_to_B:
 
         return rng, q_ball, qd_ball, p_goal                                                      
 
-    def randomize_domain(self, rng: KeyArray) -> Model: # NOTE: this function
+    def randomize_domain(self, rng: KeyArray) -> Model:
         _rngs = jax.random.split(rng, 10)
 
         return self.mjx_model.tree_replace({ # type: ignore[assignment]
@@ -228,12 +229,8 @@ class A_to_B:
         rng, observation = self.observe(rng, mjx_data, p_goal)
         observation, reward, done, p_goal, aux = self.evaluate_environment(observation, action, training_step, ball_released)        
 
-        # NOTE: not using truncation because the ball is released often enough that there is no need
-        # and since correctly bootstrapping the value function at truncation points has shown itself to cause instability,
-        # it is more practical to avoid truncation in this case. 
-        truncate = jnp.array(False)
-        # truncate = jnp.where(mjx_data.time >= self.time_limit, jnp.array(True), jnp.array(False))
-        # truncate = jnp.logical_and(truncate, jnp.logical_not(done))
+        truncate = jnp.where(mjx_data.time >= self.time_limit, jnp.array(True), jnp.array(False))
+        truncate = jnp.logical_and(truncate, jnp.logical_not(done))
 
         rng, _rng = jax.random.split(rng)
         noise = self.observation_noise*jax.random.uniform(_rng, shape=observation.shape, minval=-1.0, maxval=1.0)
@@ -247,7 +244,7 @@ class A_to_B:
         action = self.scale_action(action, self.act_space.low, self.act_space.high)
         a_car, a_arm, a_gripper = self.decode_action(action)
 
-        ctrl_arm = self.arm_ctrl(observation, a_arm) # NOTE: low level control of arm is now done in n_step(). Could remove this
+        ctrl_arm = self.arm_ctrl(observation, a_arm) 
 
         # Force only releasing once
         a_gripper = jnp.where(ball_released, 0.0, a_gripper).squeeze() # if ball is already released, the gripper will act as if trying to release the ball immediately
@@ -269,19 +266,19 @@ class A_to_B:
         normalizing_factor = 1.0 / (self.mjx_model.opt.timestep * self.steps_per_ctrl)
 
         b0, b1, b2 = b_prev
-        b3 = a_arm
+        b3 = b0 # This is just me being lazy and not removing spline controller stuff
 
         def f(mjx_data: Data, _):
+            t = (mjx_data.time - t_0)*normalizing_factor
 
             # Spline tracking controller
-            t = (mjx_data.time - t_0)*normalizing_factor
-            _ctrl = ctrl.at[self.nu_car:self.nu_car+self.nu_arm].set(self.arm_low_level_ctrl(
-                t, 
-                mjx_data.qpos[self.nq_car:self.nq_car+self.nq_arm], 
-                mjx_data.qvel[self.nv_car:self.nv_car+self.nv_arm], 
-                mjx_data.qacc[self.nv_car:self.nv_car+self.nv_arm],
-                b0, b1, b2, b3
-            ))
+            # _ctrl = ctrl.at[self.nu_car:self.nu_car+self.nu_arm].set(self.arm_low_level_ctrl(
+            #     t, 
+            #     mjx_data.qpos[self.nq_car:self.nq_car+self.nq_arm], 
+            #     mjx_data.qvel[self.nv_car:self.nv_car+self.nv_arm], 
+            #     mjx_data.qacc[self.nv_car:self.nv_car+self.nv_arm],
+            #     b0, b1, b2, b3
+            # ))
 
             # Gripper timed release
             grip = self.gripper_ctrl(jnp.array(1))
@@ -303,9 +300,9 @@ class A_to_B:
             qd_car, qd_arm, qd_gripper, pd_ball, 
             p_goal, 
             dc_goal,
-            dcc_0, dcc_1, dcc_2, dcc_3,
-            dgc_0, dgc_1, dgc_2, dgc_3,
-            dbc_0, dbc_1, dbc_2, dbc_3,
+            # dcc_0, dcc_1, dcc_2, dcc_3,
+            # dgc_0, dgc_1, dgc_2, dgc_3,
+            # dbc_0, dbc_1, dbc_2, dbc_3,
             db_target
          ) = self.decode_observation(observation) 
 
@@ -396,9 +393,9 @@ class A_to_B:
             qd_car, qd_arm, qd_gripper, pd_ball,    # velocities 
             p_goal,                                 # car goal
             dc_goal,                                # distance from car to goal
-            dcc_0, dcc_1, dcc_2, dcc_3,             # distances from car to corners
-            dgc_0, dgc_1, dgc_2, dgc_3,             # distances from goal to corners
-            dbc_0, dbc_1, dbc_2, dbc_3,             # distances from ball to corners
+            # dcc_0, dcc_1, dcc_2, dcc_3,             # distances from car to corners
+            # dgc_0, dgc_1, dgc_2, dgc_3,             # distances from goal to corners
+            # dbc_0, dbc_1, dbc_2, dbc_3,             # distances from ball to corners
             db_target                               # distance from ball to car (target)
         ], axis=0)
 
@@ -428,9 +425,9 @@ class A_to_B:
                        Array, Array, Array, Array, 
                        Array, 
                        Array, 
-                       Array, Array, Array, Array, 
-                       Array, Array, Array, Array, 
-                       Array, Array, Array, Array, 
+                       # Array, Array, Array, Array, 
+                       # Array, Array, Array, Array, 
+                       # Array, Array, Array, Array, 
                        Array]:
 
         n_pos_ball = self.nq_ball - 4       # can't observe orientation of ball
@@ -453,19 +450,19 @@ class A_to_B:
 
                 # Relative distances
                 observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 13],
-                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 13 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 14],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 2 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 3 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 4 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 5 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 6 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 7 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 8 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 9 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 10 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 11 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12],
+                # observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 12 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 13],
+                observation[self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 1 : self.nq_car + self.nq_arm + self.nq_gripper + n_pos_ball + self.nv_car + self.nv_arm + self.nv_gripper + n_lin_vel_ball + self.nq_goal + 14],
                 )
         # -> (q_car, q_arm, q_gripper, p_ball, 
         #     qd_car, qd_arm, qd_gripper, pd_ball, 
@@ -480,8 +477,10 @@ class A_to_B:
     def decode_action(self, action: Array) -> tuple[Array, Array, Array]:
         return (
                 action[0 : self.nu_car],                                                                            
-                action[self.nu_car : self.nu_car + self.nu_arm],                                                    
-                action[self.nu_car + self.nu_arm : ]                                                                
+                # action[self.nu_car : self.nu_car + self.nu_arm],                                                    
+                # action[self.nu_car + self.nu_arm : ]                                                                
+                action[self.nu_car : -1],
+                action[-1:]
                 )
         # -> (a_car, a_arm, a_gripper)
 
@@ -497,12 +496,15 @@ class A_to_B:
                 ), jnp.zeros((self.nq_car, ))
 
     def reset_arm(self, rng_arm: Array) -> tuple[Array, Array]:
-        return self.arm_limits.q_start + 0.1*jax.random.uniform(
+        noise = 0.2*jax.random.uniform(
                 key=rng_arm,
                 shape=(self.nq_arm,),
                 minval=self.arm_limits.q_min,                                                                       
                 maxval=self.arm_limits.q_max
-                ), jnp.zeros((self.nq_arm, ))
+                )
+        noise = jnp.zeros_like(noise).at[0].set(noise[0]).at[3].set(noise[3]).at[5].set(noise[5])
+
+        return jnp.clip(self.arm_limits.q_start + noise, self.arm_limits.q_min, self.arm_limits.q_max), jnp.zeros((self.nq_arm, ))
 
     def reset_gripper(self, rng_gripper: Array) -> tuple[Array, Array]:
         return jnp.concatenate([                                        
@@ -549,11 +551,11 @@ class A_to_B:
         def angle_velocity_modifier(theta: Array) -> Array:
             return 0.5 + 0.5*( jnp.abs( ( jnp.mod(theta, (pi/2.0)) ) - (pi/4.0) ) / (pi/4.0) )
 
-        def rotation_velocity_modifier(velocity: Array, omega: Array) -> Array:
-            return jnp.clip(velocity - jnp.abs(omega), 0.0, velocity)
-
-        velocity = angle_velocity_modifier(angle)*magnitude                                           
-        velocity = rotation_velocity_modifier(velocity, omega)
+        def rotational_velocity_modifier(magnitude: Array) -> Array:
+            return jnp.clip(0.1/(jnp.abs(magnitude) + 0.1), 0.0, 1)
+         
+        velocity = angle_velocity_modifier(angle)*magnitude
+        omega = rotational_velocity_modifier(magnitude)*omega
 
         velocity_x = velocity*jnp.cos(angle)
         velocity_y = velocity*jnp.sin(angle)
@@ -639,6 +641,7 @@ def main():
         _b_prev = (jnp.zeros((1, env.nq_arm)), jnp.zeros((1, env.nq_arm)), jnp.zeros((1, env.nq_arm)))
         _ball_released = jnp.zeros(False)
         environment_state = EnvironmentState(rng, mjx_model, mjx_data, _p_goal, _b_prev, _ball_released)
+        
         environment_state, observation = env.reset(environment_state)
 
         done = jnp.zeros(num_envs, dtype=bool)
