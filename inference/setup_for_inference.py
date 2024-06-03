@@ -37,7 +37,7 @@ import pdb
 # --------------------------------------------------------------------------------
 CURRENT_DIR = dirname(abspath(__file__))
 CHECKPOINT_DIR = join(CURRENT_DIR, "..", "trained_policies", "checkpoints")
-CHECKPOINT_FILE = "checkpoint_LATEST_param_dicts__fc_64_rnn_16"
+CHECKPOINT_FILE = "curriculum_sparse_at_end_param_dicts__fc_64_rnn_16"
 MODEL_DIR = "mujoco_models"
 MODEL_FILE = "scene.xml"
 SHOP_FLOOR_IP = "10.0.0.2"  # hostname for the workshop floor, i.e. the Franka Emika Desk
@@ -414,16 +414,38 @@ def ball_pos_cam_frame(
 
     return array([x, y, z])
 
-# TODO: finish this
-# def observe_ball(
-#     floor_R: Array,
-#     floor_t: Array,
-#     cam_params: tuple[float, ...],
-#     xyz_ball_cam_frame: ndarray,
-#     ) -> tuple[Array, Array]:
-#
-#     p_ball_floor_frame = floor_R @ (xyz_ball_cam_frame - floor_t)
 
+def ball_pos_gripping(
+        robot_state: RobotState,
+        ball_pos_offset_x: float = 0.0,
+        ball_pos_offset_y: float = 0.0,
+        ball_pos_offset_z: float = 0.9
+    ) -> tuple[ndarray, ndarray]:
+
+    p_ball = (
+        np_array(robot_state.O_T_EE, dtype=float32)[-1,0:3]
+        + np_array(robot_state.F_x_Cload, dtype=float32)
+        + np_array([ball_pos_offset_x, ball_pos_offset_y, ball_pos_offset_z], dtype=float32)
+    )
+    pd_ball = np_array(robot_state.O_dP_EE_d[0:3], dtype=float32)
+
+    return p_ball, pd_ball
+
+
+@jit
+def observe_ball(
+    floor_R: Array,
+    floor_t: Array,
+    p_ball_cam_frame: ndarray,
+    prev_p_ball: Array,
+    prev_pd_ball: Array,
+    dt: float,
+    ) -> tuple[Array, Array]:
+
+    p_ball = floor_R @ (p_ball_cam_frame - floor_t)
+    pd_ball = (finite_difference(p_ball, prev_p_ball, dt) + prev_pd_ball) / 2.0 # Average of previous computed velocity and positional finite differences
+
+    return p_ball, pd_ball
 
 def observe(
     env: A_to_B,  # partial()
@@ -437,23 +459,26 @@ def observe(
     robot_state: RobotState,
     gripper_state: GripperState,
     gripping: bool,
+    p_ball_cam_frame: ndarray,
+    prev_p_ball: ndarray,
+    prev_pd_ball: ndarray,
     dt: float,
-    car_pos_offset_x: float = 0.0,
-    car_pos_offset_y: float = 0.0
+    pos_offset_x: float = -0.07,
+    pos_offset_y: float = 0.0
     ) -> tuple[Array, tuple[Array, ...]]:
 
     q_car, qd_car, car_R_gf, car_t_gf = observe_car(
         floor_R, floor_t, car_R, car_t, prev_q_car, prev_qd_car, dt,
-        car_pos_offset_x=car_pos_offset_x,
-        car_pos_offset_y=car_pos_offset_y
+        car_pos_offset_x=pos_offset_x,
+        car_pos_offset_y=pos_offset_y
     )
     q_arm, qd_arm = observe_arm(robot_state)
     q_gripper, qd_gripper = observe_gripper(gripper_state, gripping)
 
-    # TODO: ball tracking
-    # p_ball, pd_ball = observe_ball()
-    p_ball = array([0.0, 0.0, 1.3])
-    pd_ball = array([0.0, 0.0, 0.0])
+    if gripping:
+        p_ball, pd_ball = ball_pos_gripping(robot_state)
+    else:
+        p_ball, pd_ball = observe_ball(floor_R, floor_t, p_ball_cam_frame, prev_p_ball, prev_pd_ball, dt)
 
     relative_distances = observe_relative_distances(q_car, p_goal, p_ball, env)
 

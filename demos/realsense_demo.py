@@ -9,7 +9,7 @@ from pprint import pprint
 def draw_axis(img, R, t, K):
     rotV, _ = cv2.Rodrigues(R)
     points = np.float32([[0.1, 0, 0], [0, 0.1, 0], [0, 0, -0.1], [0, 0, 0]]).reshape(-1, 3) # inverted z axis
-    axisPoints, _ = cv2.projectPoints(points, rotV, t, K, (0, 0, 0, 0))
+    axisPoints, _ = cv2.projectPoints(points, rotV, t, K, DIST_COEFFS)
     axisPoints = axisPoints.astype(int)
     img = cv2.line(img, axisPoints[3].ravel(), tuple(axisPoints[0].ravel()), (255,0,0), 3)
     img = cv2.line(img, axisPoints[3].ravel(), tuple(axisPoints[1].ravel()), (0,255,0), 3)
@@ -46,13 +46,16 @@ if __name__ == "__main__":
     CX: float = cam_intrinsics.ppx
     CY: float = cam_intrinsics.ppy
     CAMERA_PARAMS: tuple[float, ...]= (FX, FY, CX, CY)
+    DIST_COEFFS: np.ndarray = np.array(cam_intrinsics.coeffs, dtype=np.float32)
 
     K = np.float32([[FX, 0, CX],
                     [0, FY, CY],
                     [0, 0, 1]])
 
-    R = np.eye(3)
-    t = np.zeros((3, 1))
+    car_R = np.eye(3)
+    car_t = np.zeros((3, 1))
+    floor_R = np.eye(3)
+    floor_t = np.zeros((3, 1))
 
     detector: Detector = Detector(
         families="tag36h11",
@@ -70,13 +73,25 @@ if __name__ == "__main__":
         if not frame: continue
 
         image = np.asarray(frame.data, dtype=np.uint8)
-        detection: Detection = detector.detect(image, estimate_tag_pose=True, camera_params=CAMERA_PARAMS, tag_size=0.186)
+        detections: list[Detection] = detector.detect(
+            image, estimate_tag_pose=True,
+            camera_params=CAMERA_PARAMS,
+            tag_size=0.1858975
+        ) # type: ignore[assignment]
 
-        if len(detection) > 0:
-            R = detection[0].pose_R
-            t = detection[0].pose_t
+        car_detection = list(filter(lambda d: d.tag_id == 0, detections))
+        floor_detection = list(filter(lambda d: d.tag_id == 1, detections))
 
-        frame = draw_axis(image, R, t, K)
+        if car_detection:
+                car_R = car_detection[0].pose_R      # type: ignore[assignment]
+                car_t = car_detection[0].pose_t       # type: ignore[assignment]
+
+        if floor_detection:
+                floor_R=floor_detection[0].pose_R    # type: ignore[assignment]
+                floor_t=floor_detection[0].pose_t     # type: ignore[assignment]
+
+        frame = draw_axis(image, car_R, car_t, K)
+        frame = draw_axis(image, floor_R, floor_t, K)
 
         cv2.imshow("Realsense Camera", image)
         if cv2.waitKey(1) & 0xFF == ord('q'):

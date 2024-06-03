@@ -1,5 +1,6 @@
 import os
 from os.path import join, dirname, abspath
+os.sched_setaffinity(0, {1,2,3})
 import numpy as np
 import cv2
 import pyrealsense2 as rs
@@ -7,8 +8,8 @@ from ultralytics.models import YOLO
 from torch import set_num_threads,  set_num_interop_threads
 from torch.onnx import is_onnxrt_backend_supported
 
-set_num_threads(1)
-set_num_interop_threads(1)
+set_num_threads(12)
+set_num_interop_threads(12)
 
 def main():
     # cache_dir = join(dirname(abspath(__file__)), "../", "compiled_functions")
@@ -31,7 +32,7 @@ def main():
         "fastball",
         "moving ball",
         "blurry ball",
-        # "motion blurred ball",
+        # "motion blurred ball", # finds larger objects
         "large ball",
         "tiny ball",
         "toy ball",
@@ -47,10 +48,13 @@ def main():
         "sphere",
         "round ball",
         "orb",
+        # "ball in robot gripper",
+        # "ball in robot claw",
+        # "ball between robot fingers",
+        # "ball in robot end effector",
     ])
     model.compile(mode="max-autotune-no-cudagraphs", backend="inductor")
 
-    os.sched_setaffinity(0, {3})
 
     pipe = rs.pipeline()
     cfg = rs.config()
@@ -125,10 +129,6 @@ def main():
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         image = results[0].plot(img=image)
-
-
-
-        print()
 
         cv2.imshow("Realsense Camera", image)
         if cv2.waitKey(1) & 0xFF == ord('q'):
