@@ -274,10 +274,11 @@ def main():
     # CHECKPOINT_FILE = "simple_curriculum"
     # CHECKPOINT_FILE = "zeus_rnn_32"
     # CHECKPOINT_FILE = "checkpoint_LATEST"
-    CHECKPOINT_FILE = "_IN_TRAINING__2559__param_dicts__fc_64_rnn_8"
+    # CHECKPOINT_FILE = "_IN_TRAINING__2559__param_dicts__fc_64_rnn_8"
     # CHECKPOINT_FILE = "_IN_TRAINING__5118__param_dicts__fc_64_rnn_8"
     # CHECKPOINT_FILE = "_IN_TRAINING__85__param_dicts__fc_64_rnn_8"
     # CHECKPOINT_FILE = "_checkpoint_LATEST_param_dicts__fc_64_rnn_8"
+    CHECKPOINT_FILE = "checkpoint_LATEST_xd"
 
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
@@ -371,16 +372,16 @@ def main():
     actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
     # restore state dicts
-    abstract_state = {"actor_"+str(i): device_get(ts.params) for i, ts in enumerate(actors.train_states)}
-    path = join(CHECKPOINT_DIR, CHECKPOINT_FILE)
+    print("\nrestoring actors...\n")
+    abstract_state = {"actor_"+str(i): (device_get(ts.params), device_get(var)) for i, (ts, var) in enumerate(zip(actors.train_states, actors.vars))}
     restored_state = checkpointer.restore(
-            # join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)), 
-            path,
+            join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)), 
             args=args.StandardRestore(abstract_state)
     )
-    # create actors with restored state dicts
     restored_actors = actors
-    restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
+    # restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
+    restored_actors.train_states = tuple(FakeTrainState(params=params) for (params, _) in restored_state.values())
+    restored_actors.vars = tuple(vars for (_, vars) in restored_state.values())
 
 
     _rollout_fn = partial(rollout, env, model, data, actor_forward_fns, rnn_hidden_size)
