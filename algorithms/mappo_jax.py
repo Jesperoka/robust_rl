@@ -416,8 +416,8 @@ def actor_loss(
         entropy = policy.entropy(seed=entropy_rng).mean()
 
         # PPO clipped objective
-        # clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-        # actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
+        clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+        actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
     
         # PPO not clpping objective (kl penalty only)
         # actor_utility = (ratio*gae).mean()
@@ -425,8 +425,8 @@ def actor_loss(
         # P30 objective (i.e. sigmoid instead of clipping, https://arxiv.org/pdf/2205.10047)
         # As far as I can tell tau is just set to 4 in the official implementation, and is never really explained in the paper.
         # The word "temperature" which is what they call tau, is used once in the paper and it's just when they mention that tau is called that."
-        tau = 4 
-        actor_utility = (gae*(4.0/tau)*jax.nn.sigmoid(ratio*tau - tau)).mean()
+        # tau = 4 
+        # actor_utility = (gae*(4.0/tau)*jax.nn.sigmoid(ratio*tau - tau)).mean()
 
         kl_beta = jnp.where(approx_kl > target_kl, kl_beta*1.5, kl_beta/1.5)
 
@@ -782,7 +782,7 @@ def make_train(config: AlgorithmConfig, env: A_to_B, rollout_generator_queue: Qu
                 print("\n\nsaving actors...\n")
                 checkpointer = Checkpointer(StandardCheckpointHandler())
                 state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(actors.train_states)}
-                path = join(CHECKPOINT_DIR, "_IN_TRAINING_"+f"_{step}_"+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size))
+                path = join(CHECKPOINT_DIR, "_IN_TRAINING_xd"+f"_{step}_"+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size))
                 checkpointer.save(path, force=True, args=args.StandardSave(state))
                 print("\n...actors saved to "+str(path)+" \n\n")
 
@@ -958,7 +958,7 @@ def main():
     current_dir = dirname(abspath(__file__))
     SCENE = join(current_dir, "..","mujoco_models","scene.xml")
     CHECKPOINT_DIR = join(current_dir, "..", "trained_policies", "checkpoints")
-    CHECKPOINT_FILE = "checkpoint_LATEST"
+    CHECKPOINT_FILE = "checkpoint_LATEST_xd"
 
     print("\n\nINFO:\njax.local_devices():", jax.local_devices(), " jax.local_device_count():",
           jax.local_device_count(), " xla.is_optimized_build(): ", jax.lib.xla_client._xla.is_optimized_build(), # type: ignore[attr-defined]
