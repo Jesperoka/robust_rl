@@ -274,7 +274,9 @@ def main():
     # CHECKPOINT_FILE = "simple_curriculum"
     # CHECKPOINT_FILE = "zeus_rnn_32"
     # CHECKPOINT_FILE = "checkpoint_LATEST"
-    CHECKPOINT_FILE = "_IN_TRAINING__85_"
+    CHECKPOINT_FILE = "checkpoint_LATEST_with_vars"
+    CHECKPOINT_FILE = "_IN_TRAINING_with_vars_1706_"
+
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
     data: MjData = MjData(model)
@@ -285,18 +287,15 @@ def main():
     num_envs = 1
 
     options: EnvironmentOptions = EnvironmentOptions(
-        reward_fn      = partial(simple_curriculum_reward, 20_000_000),
-        # car_ctrl       = car_fixed_pose,
+        reward_fn           = partial(simple_curriculum_reward, 20_000_000),
         arm_ctrl            = minimal_pos_controller,
         arm_act_min         = jnp.array([-2.0, -2.0, -2.5]),
         arm_act_max         = jnp.array([2.0, 2.0, 2.5]),
-        # car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
-        # car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
-        # arm_low_level_ctrl = minimal_actions_low_level_controller,
-        gripper_ctrl   = gripper_ctrl,
-        # gripper_ctrl   = gripper_always_grip,
-        goal_radius    = 0.05,
-        steps_per_ctrl = 20,
+        gripper_ctrl        = gripper_ctrl,
+        goal_radius         = 0.05,
+        steps_per_ctrl      = 20,
+        time_limit          = 3.0,
+
     )
     env = A_to_B(mjx_model, mjx_data, grip_site_id, options)
     rng = random.PRNGKey(reproducibility_globals.PRNG_SEED)
@@ -353,7 +352,7 @@ def main():
     
     # _rollout_fn = _rollout
     _rollout_fn = partial(rollout, env, model, data)
-    _rollout_fn = partial(_rollout_fn, max_steps=250)
+    _rollout_fn = partial(_rollout_fn, max_steps=500)
 
     lr = 3.0e-4
     max_grad_norm = 0.5
@@ -370,14 +369,16 @@ def main():
     actor_forward_fns = tuple(partial(ts.apply_fn, train=False) for ts in actors.train_states) # type: ignore[attr-defined]
 
     # restore state dicts
-    abstract_state = {"actor_"+str(i): device_get(ts.params) for i, ts in enumerate(actors.train_states)}
+    print("\nrestoring actors...\n")
+    abstract_state = {"actor_"+str(i): (device_get(ts.params), device_get(var)) for i, (ts, var) in enumerate(zip(actors.train_states, actors.vars))}
     restored_state = checkpointer.restore(
             join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(rnn_fc_size)+"_rnn_"+str(rnn_hidden_size)), 
             args=args.StandardRestore(abstract_state)
     )
-    # create actors with restored state dicts
     restored_actors = actors
-    restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
+    # restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
+    restored_actors.train_states = tuple(FakeTrainState(params=params) for (params, _) in restored_state.values())
+    restored_actors.vars = tuple(vars for (_, vars) in restored_state.values())
 
 
     _rollout_fn = partial(rollout, env, model, data, actor_forward_fns, rnn_hidden_size)
