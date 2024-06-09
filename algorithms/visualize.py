@@ -274,11 +274,8 @@ def main():
     # CHECKPOINT_FILE = "simple_curriculum"
     # CHECKPOINT_FILE = "zeus_rnn_32"
     # CHECKPOINT_FILE = "checkpoint_LATEST"
-    # CHECKPOINT_FILE = "_IN_TRAINING__2559__param_dicts__fc_64_rnn_8"
-    # CHECKPOINT_FILE = "_IN_TRAINING__5118__param_dicts__fc_64_rnn_8"
-    # CHECKPOINT_FILE = "_IN_TRAINING__85__param_dicts__fc_64_rnn_8"
-    # CHECKPOINT_FILE = "_checkpoint_LATEST_param_dicts__fc_64_rnn_8"
-    CHECKPOINT_FILE = "checkpoint_LATEST_xd"
+    CHECKPOINT_FILE = "checkpoint_LATEST_with_vars"
+    CHECKPOINT_FILE = "_IN_TRAINING_with_vars_1706_"
 
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
@@ -355,7 +352,7 @@ def main():
     
     # _rollout_fn = _rollout
     _rollout_fn = partial(rollout, env, model, data)
-    _rollout_fn = partial(_rollout_fn, max_steps=250)
+    _rollout_fn = partial(_rollout_fn, max_steps=500)
 
     lr = 3.0e-4
     max_grad_norm = 0.5
