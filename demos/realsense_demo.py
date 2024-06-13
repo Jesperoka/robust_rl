@@ -21,25 +21,28 @@ if __name__ == "__main__":
     pipe = rs.pipeline()
     cfg = rs.config()
     cfg.disable_all_streams()
-    cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 90)
+    # cfg.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 90)
+    cfg.enable_stream(rs.stream.color, 0, 848, 480, rs.format.rgb8, 60)
     profile = pipe.start(cfg)
     device = profile.get_device()
-    stereo_sensor = device.query_sensors()[0]
+    print(device.query_sensors())
+    sensor = device.query_sensors()[0]
 
     print(device.query_sensors())
-    rgb_sensor = device.query_sensors()[1]
+    # rgb_sensor = device.query_sensors()[1]
 
-    stereo_sensor.set_option(rs.option.emitter_enabled, 0)
-    stereo_sensor.set_option(rs.option.laser_power, 0)
-    stereo_sensor.set_option(rs.option.enable_auto_exposure, 0)
-    stereo_sensor.set_option(rs.option.gain, 32) # default is 16
-    stereo_sensor.set_option(rs.option.exposure, 3300)
+    print(dir(rs.option))
+    sensor.set_option(rs.option.emitter_enabled, 0)
+    sensor.set_option(rs.option.laser_power, 0)
+    sensor.set_option(rs.option.enable_auto_exposure, 0)
+    sensor.set_option(rs.option.gain, 16) # default is 16
+    sensor.set_option(rs.option.exposure, 3000)
 
-    # pprint(dir(rs.option))
-    print(rs.option.contrast.value)
-    print(rs.option.white_balance.value)
+    print(rs.option.hue.value)
+    print(rs.option.saturation.value)
 
-    cam_intrinsics = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile().get_intrinsics()
+    # cam_intrinsics = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile().get_intrinsics()
+    cam_intrinsics = profile.get_stream(rs.stream.color, 0).as_video_stream_profile().get_intrinsics()
 
     FX: float = cam_intrinsics.fx
     FY: float = cam_intrinsics.fy
@@ -60,23 +63,36 @@ if __name__ == "__main__":
     detector: Detector = Detector(
         families="tag36h11",
         nthreads=1,
-        quad_decimate=0.0,
+        quad_decimate=1.5,
         quad_sigma=0.0,
-        refine_edges=0,
-        decode_sharpening=0.0
+        refine_edges=1,
+        decode_sharpening=0.25,
     )
 
     print("Running april-tag detection...\nPress 'q' to exit")
     while True:
         frames = pipe.wait_for_frames()
-        frame = frames.get_infrared_frame()
+        # frame = frames.get_infrared_frame()
+        frame = frames.get_color_frame()
         if not frame: continue
 
         image = np.asarray(frame.data, dtype=np.uint8)
+
+        crop_left_x = 152
+        crop_right_x = 88
+        crop_top_y = 0
+        # crop_bottom_y = 0
+
+        image = image[crop_top_y:, crop_left_x:-crop_right_x]
+
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        image = cv2.equalizeHist(image)
+        image = cv2.convertScaleAbs(image, alpha=0.5, beta=0.0)
+
         detections: list[Detection] = detector.detect(
             image, estimate_tag_pose=True,
             camera_params=CAMERA_PARAMS,
-            tag_size=0.1858975
+            tag_size=0.1475# 0.1858975
         ) # type: ignore[assignment]
 
         car_detection = list(filter(lambda d: d.tag_id == 0, detections))
