@@ -416,8 +416,8 @@ def actor_loss(
         entropy = policy.entropy(seed=entropy_rng).mean()
 
         # PPO clipped objective
-        # clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-        # actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
+        clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+        actor_utility = jnp.minimum(ratio*gae, clipped_ratio*gae).mean()
     
         # PPO not clpping objective (kl penalty only)
         # actor_utility = (ratio*gae).mean()
@@ -425,13 +425,14 @@ def actor_loss(
         # P30 objective (i.e. sigmoid instead of clipping, https://arxiv.org/pdf/2205.10047)
         # As far as I can tell tau is just set to 4 in the official implementation, and is never really explained in the paper.
         # The word "temperature" which is what they call tau, is used once in the paper and it's just when they mention that tau is called that."
-        tau = 4 
-        actor_utility = (gae*(4.0/tau)*jax.nn.sigmoid(ratio*tau - tau)).mean()
+
+        # tau = 4 
+        # actor_utility = (gae*(4.0/tau)*jax.nn.sigmoid(ratio*tau - tau)).mean()
 
         kl_beta = jnp.where(approx_kl > target_kl, kl_beta*1.5, kl_beta/1.5)
 
         entropy_regularized_actor_utility = actor_utility + ent_coef * entropy
-        kl_penalized_actor_utility = entropy_regularized_actor_utility - kl_beta * approx_kl
+        kl_penalized_actor_utility = entropy_regularized_actor_utility # - kl_beta * approx_kl # NOTE: kl penalty turned off
     
         actor_loss = -kl_penalized_actor_utility
 
@@ -1015,8 +1016,8 @@ def main():
         # arm_ctrl            = arm_fixed_pose,
         # gripper_ctrl        = gripper_always_grip,
         arm_ctrl            = minimal_pos_controller,
-        arm_act_min         = jnp.array([-2.0, -2.0, -2.5]),
-        arm_act_max         = jnp.array([2.0, 2.0, 2.5]),
+        arm_act_min         = jnp.array([-1.7, -1.7, -2.0]),
+        arm_act_max         = jnp.array([1.7, 1.7, 2.0]),
         # car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
         # car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
         # arm_low_level_ctrl  = arm_spline_tracking_controller,
@@ -1089,7 +1090,6 @@ def main():
 
     print("\n\nsaving actors...\n")
     checkpointer = Checkpointer(StandardCheckpointHandler())
-    # state = {"actor_"+str(i): jax.device_get(ts.params) for i, ts in enumerate(env_final.actors.train_states)}
     state = {"actor_"+str(i): (jax.device_get(ts.params), jax.device_get(var)) for i, (ts, var) in enumerate(zip(env_final.actors.train_states, env_final.actors.vars))}
     checkpointer.save(join(CHECKPOINT_DIR, CHECKPOINT_FILE+"_param_dicts__fc_"+str(config.rnn_fc_size)+"_rnn_"+str(config.rnn_hidden_size)), force=True, args=args.StandardSave(state))
     print("\n...actors saved.\n\n")
@@ -1117,7 +1117,6 @@ def main():
             args=args.StandardRestore(abstract_state)
     )
     restored_actors = actors
-    # restored_actors.train_states = tuple(FakeTrainState(params=params) for params in restored_state.values())
     restored_actors.train_states = tuple(FakeTrainState(params=params) for (params, _) in restored_state.values())
     restored_actors.vars = tuple(vars for (_, vars) in restored_state.values())
     assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: (x == y).all(), env_final.actors.train_states[0].params, restored_actors.train_states[0].params))

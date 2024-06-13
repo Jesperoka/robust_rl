@@ -143,10 +143,16 @@
     <!--         ctrl="0 0 0 0.0 -0.78539816 0.0 -2.35619449 0.0 1.57079633 0.78539816 0 0 0 0" /> -->
     <!-- </keyframe> -->
 
+    <!-- <keyframe> -->
+    <!--     <key name="q_start" -->
+    <!--         qpos="0 0 0 0.0 -0.4 0.0 -2.35619449 0.0 1.57079633 0.78539816 0 0 0 0 0 0 0 0 0" -->
+    <!--         ctrl="0 0 0 0.0 -0.4 0.0 0.0 0.0 0.0 0.78539816 0 0 0 0" /> -->
+    <!-- </keyframe> -->
+
     <keyframe>
         <key name="q_start"
-            qpos="0 0 0 0.0 -0.4 0.0 -2.35619449 0.0 1.57079633 0.78539816 0 0 0 0 0 0 0 0 0"
-            ctrl="0 0 0 0.0 -0.4 0.0 0.0 0.0 0.0 0.78539816 0 0 0 0" />
+            qpos="0 0 0 0.0 0.4 0.0 -2.0 0.0 2.3 0.78539816 0 0 0 0 0 0 0 0 0"
+            ctrl="0 0 0 0.0 0.4 0.0 0.0 0.0 0.0 0.78539816 0 0 0 0" />
     </keyframe>
 
     <!-- Actuators -->
@@ -211,16 +217,23 @@
         <!-- <general class="panda" name="joint_5" joint="joint_5" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-0.0175 3.7525" forcerange="-12 12" /> -->
         <!-- <general class="panda" name="joint_6" joint="joint_6" gainprm="2000" biasprm="0 -2000 -200" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
 
-        <!-- <position class="panda" name="joint_0" joint="joint_0" kp="300" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
-        <velocity class="panda" name="joint_0" joint="joint_0" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  />
+        <!-- Config 1 -->
+        <!-- <velocity class="panda" name="joint_0" joint="joint_0" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  /> -->
+        <!-- <position class="panda" name="joint_1" joint="joint_1" kp="600" ctrlrange="-1.7628 1.7628" forcerange="-87 87" /> --> 
+        <!-- <position class="panda" name="joint_2" joint="joint_2" kp="600" ctrlrange="-2.8973 2.8973" forcerange="-87 87" /> -->
+        <!-- <velocity class="panda" name="joint_3" joint="joint_3" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  /> -->
+        <!-- <position class="panda" name="joint_4" joint="joint_4" kp="250" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+        <!-- <velocity class="panda" name="joint_5" joint="joint_5" kv="20" ctrlrange="-2.5 2.5" forcerange="-12 12"  /> -->
+        <!-- <position class="panda" name="joint_6" joint="joint_6" kp="150" ctrlrange="-2.8973 2.8973" forcerange="-12 12" /> -->
+
+        <!-- Config 2 -->
+        <velocity class="panda" name="joint_0" joint="joint_0" kv="20" ctrlrange="-1.7 1.7" forcerange="-87 87"  />
         <position class="panda" name="joint_1" joint="joint_1" kp="600" ctrlrange="-1.7628 1.7628" forcerange="-87 87" /> 
         <position class="panda" name="joint_2" joint="joint_2" kp="600" ctrlrange="-2.8973 2.8973" forcerange="-87 87" />
-        <!-- <position class="panda" name="joint_3" joint="joint_3" kp="300" ctrlrange="-3.0718 -0.0698" forcerange="-87 87" /> -->
-        <velocity class="panda" name="joint_3" joint="joint_3" kv="20" ctrlrange="-2.0 2.0" forcerange="-87 87"  />
-        <position class="panda" name="joint_4" joint="joint_4" kp="250" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
-        <!-- <position class="panda" name="joint_5" joint="joint_5" kp="80" ctrlrange="-0.0175 3.7525" forcerange="-12 12" /> -->
-        <velocity class="panda" name="joint_5" joint="joint_5" kv="20" ctrlrange="-2.5 2.5" forcerange="-12 12"  />
-        <position class="panda" name="joint_6" joint="joint_6" kp="150" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
+        <velocity class="panda" name="joint_3" joint="joint_3" kv="20" ctrlrange="-1.7 1.7" forcerange="-87 87"  />
+        <position class="panda" name="joint_4" joint="joint_4" kp="150" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
+        <velocity class="panda" name="joint_5" joint="joint_5" kv="20" ctrlrange="-2.0 2.0" forcerange="-12 12"  />
+        <position class="panda" name="joint_6" joint="joint_6" kp="20" ctrlrange="-2.8973 2.8973" forcerange="-12 12" />
 
         <!-- Gripper actuator -->
         <position class="panda" name="left_finger_position" joint="finger_joint_1" forcerange="-100 100" kp="100" ctrlrange="0 0.04" />
