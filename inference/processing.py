@@ -40,7 +40,7 @@ if __name__ == "__main__":
     print(noisy_signal.shape)
 
     # Apply the low-pass filter
-    lpf = LowPassFilter(input_shape=(2, ), history_length=10, bandlimit_hz=0.75, sample_rate_hz=22.32)
+    lpf = LowPassFilter(input_shape=(2, ), history_length=30, bandlimit_hz=2.0, sample_rate_hz=22.32)
     filtered_signal = np.array([lpf(x) for x in noisy_signal])
 
     # Plot the results

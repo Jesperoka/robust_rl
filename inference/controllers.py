@@ -161,7 +161,7 @@ def minimal_actions_low_level_controller(q_arm: Array, qd_arm: Array, qdd_arm: A
 
     kp_pos = array([200.0, 100.0, 200.0, 0.0, 100.0, 0.0, 100.0], dtype=float32)
     kd_pos = array([20.0, 20.0, 20.0, 0.0, 20.0, 0.0, 20.0], dtype=float32)
-    
+
     position_margins = array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1], dtype=float32)
 
     j3_safety_torque = kp_pos[3]*(q[3] - q_arm[3]) - kd_pos[3]*qd_arm[3]
@@ -175,13 +175,13 @@ def minimal_actions_low_level_controller(q_arm: Array, qd_arm: Array, qdd_arm: A
     j3_dampening = 0.01
     j5_dampening = 0.01
 
-    j3_deviation_from_start = jnp_abs(q_arm[3] - q[3])    
+    j3_deviation_from_start = jnp_abs(q_arm[3] - q[3])
     j5_deviation_from_start = jnp_abs(q_arm[5] - q[5])
-    
+
     j3_policy_torque = j3_stiffness*(j3_vel - qd_arm[3]) - j3_dampening*qdd_arm[3] #- j3_dampening*j3_deviation_from_start
     j5_policy_torque = j5_stiffness*(j5_vel - qd_arm[5]) - j5_dampening*qdd_arm[5]  #- j5_dampening*j5_deviation_from_start
 
-    j3_torque = where(j3_safe, j3_policy_torque, j3_safety_torque) 
+    j3_torque = where(j3_safe, j3_policy_torque, j3_safety_torque)
     j5_torque = where(j5_safe, j5_policy_torque, j5_safety_torque)
 
     tau = diag_gain_PD(q_arm, q, qd_arm, zeros_like(qd_arm), kp_pos, kd_pos).at[3].set(j3_torque).at[5].set(j5_torque)
@@ -193,7 +193,7 @@ def minimal_actions_controller(decode_obs: ObsDecodeFuncSig,  observation: Array
 
     (_, q_arm, _, _, _, qd_arm, *_) = decode_obs(observation)
 
-    return zeros(7)    
+    return zeros(7)
 
     # return clip(tau, PandaLimits().tau_min, PandaLimits().tau_max)
 
@@ -244,7 +244,7 @@ def main():
                [1, 2, 3]], dtype=float32),
     ]
 
-    control_points = [cp + uniform(-0.001, 0.001, cp.shape) for cp in control_points]  
+    control_points = [cp + uniform(-0.001, 0.001, cp.shape) for cp in control_points]
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')

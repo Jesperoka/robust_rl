@@ -3,7 +3,7 @@ from jax import Array
 from jax.numpy import array
 
 from dataclasses import dataclass, field
-from math import pi 
+from math import pi
 
 
 @dataclass(frozen=True)
@@ -45,16 +45,16 @@ class PandaLimits:
 
     # Joint Space limits
     q_min: Array = field(default_factory=lambda:array([         # rad
-        -2.8973, 
-        -1.7628, 
-        -2.8973, 
-        -3.0718, 
-        -2.8973, 
-        -0.0175, 
+        -2.8973,
+        -1.7628,
+        -2.8973,
+        -3.0718,
+        -2.8973,
+        -0.0175,
         -2.8973
     ], dtype=float))
 
-    q_max: Array = field(default_factory=lambda:array([         # rad   
+    q_max: Array = field(default_factory=lambda:array([         # rad
         2.8973,
         1.7628,
         2.8973,
@@ -74,7 +74,7 @@ class PandaLimits:
         -2.6100
     ], dtype=float))
 
-    q_dot_max: Array = field(default_factory=lambda:array([     # rad/s 
+    q_dot_max: Array = field(default_factory=lambda:array([     # rad/s
         2.1750,
         2.1750,
         2.1750,
@@ -178,7 +178,7 @@ class ZeusLimits:
     omega_min:  float = -1.0    # rad/s
     omega_max:  float = 1.0     # rad/s
 
-    # Position 
+    # Position
     x_max:  float = PlayingArea.x_center + PlayingArea.half_x_length - ZeusDimensions.l_diag # m
     x_min:  float = PlayingArea.x_center - PlayingArea.half_x_length + ZeusDimensions.l_diag # m
     y_max:  float = PlayingArea.y_center + PlayingArea.half_y_length - ZeusDimensions.l_diag # m
