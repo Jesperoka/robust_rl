@@ -19,13 +19,22 @@ class PlayingArea:
 @dataclass(frozen=True)
 class PandaLimits:
     # panda-python start pose
+    # q_start: Array = field(default_factory=lambda:array([       # rad
+    #     0.0, 
+    #     -0.78539816,
+    #     0.0,
+    #     -2.35619449,
+    #     0.0,
+    #     1.57079633,
+    #     0.78539816
+    #     ], dtype=float))
     q_start: Array = field(default_factory=lambda:array([       # rad
         0.0, 
-        -0.78539816,
+        0.4,
         0.0,
-        -2.35619449,
+        -2.0,
         0.0,
-        1.57079633,
+        2.3,
         0.78539816
         ], dtype=float))
 
