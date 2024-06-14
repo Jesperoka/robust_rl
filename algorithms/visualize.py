@@ -275,7 +275,7 @@ def main():
     # CHECKPOINT_FILE = "zeus_rnn_32"
     # CHECKPOINT_FILE = "checkpoint_LATEST"
     # CHECKPOINT_FILE = "checkpoint_LATEST_with_vars"
-    CHECKPOINT_FILE = "ppo_loss_early_training/_IN_TRAINING_with_vars_340_"
+    CHECKPOINT_FILE = "ppo_loss_config_2/_IN_TRAINING_with_vars_6824_"
 
 
     model: MjModel = MjModel.from_xml_path(SCENE)                                                                      
