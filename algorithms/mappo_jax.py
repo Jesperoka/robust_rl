@@ -1016,8 +1016,8 @@ def main():
         # arm_ctrl            = arm_fixed_pose,
         # gripper_ctrl        = gripper_always_grip,
         arm_ctrl            = minimal_pos_controller,
-        arm_act_min         = jnp.array([-1.5, -1.5, -1.8]),
-        arm_act_max         = jnp.array([1.5, 1.5, 1.8]),
+        arm_act_min         = jnp.array([-1.5, -1.5, -0.5]),
+        arm_act_max         = jnp.array([1.5, 1.5, 0.5]),
         # car_act_min         = ZeusLimits().a_min.at[2].set(-0.75),
         # car_act_max         = ZeusLimits().a_max.at[0].set(0.75).at[2].set(0.75),
         # arm_low_level_ctrl  = arm_spline_tracking_controller,
@@ -1027,7 +1027,7 @@ def main():
         time_limit          = 3.0,
 
         # timestep_noise      = 0.0,
-        # impratio_noise      = 0.0,
+        # impratio_noise      = 0.5,
         # tolerance_noise     = 0.0,
         # ls_tolerance_noise  = 0.0,
         # wind_noise          = 0.0,
@@ -1037,8 +1037,9 @@ def main():
         # actuator_gain_noise = 0.0,
         # actuator_bias_noise = 0.0,
         # actuator_dyn_noise  = 0.0,
+        observation_noise   = 0.1, # fraction  [*]     obs = (1 + noise)*obs
         # observation_noise   = 0.0,
-        # ctrl_noise          = 0.0,
+        ctrl_noise          = 0.025,
 
     )
 

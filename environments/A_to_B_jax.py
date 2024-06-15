@@ -221,8 +221,9 @@ class A_to_B:
 
         rng, ctrl, a_arm, a_gripper, ball_released = self.compute_controls(rng, car_orientation, observation, action, ball_released)
 
-        # noise = self.ctrl_noise*jax.random.uniform(_rng, shape=ctrl.shape, minval=-1.0, maxval=1.0)
-        # ctrl = (1.0 + noise)*ctrl
+        rng, _rng = jax.random.split(rng)
+        noise = self.ctrl_noise*jax.random.uniform(_rng, shape=ctrl.shape, minval=-1.0, maxval=1.0)
+        ctrl = (1.0 + noise)*ctrl
 
         mjx_data, b_prev = self.n_step(mjx_model, mjx_data, ctrl, a_arm, b_prev, a_gripper)
 
